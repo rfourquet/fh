@@ -1,11 +1,11 @@
 module Main where
 
 import           Control.Exception    (SomeException, try)
-import           Control.Monad        (forM, when)
+import           Control.Monad        (forM_, when)
 import qualified Crypto.Hash.SHA1     as SHA1
 import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BSL
-import           Data.List            (foldl', sort)
+import           Data.List            (foldl', sort, sortOn)
 import           Data.Maybe           (catMaybes)
 import           Data.String          (fromString)
 import           Numeric              (showHex)
@@ -71,15 +71,11 @@ options = info (parserOptions <**> helper)
 main :: IO ()
 main = do
   opt <- execParser options
-  list' <- forM (optPaths opt) $ \path -> do
-    ent' <- mkEntry opt path
-    case ent' of
-      Nothing  -> return Nothing
-      Just ent -> do putStrLn $ showEntry opt ent
-                     return ent'
-  let list = catMaybes list'
+  list <- (if optSort opt then sortOn _size else id) . catMaybes <$>
+            sequence (mkEntry opt <$> optPaths opt)
+  forM_ list $ putStrLn . showEntry opt
   when (optTotal opt) $
-    putStrLn $ showEntry opt $ combine opt ("*total*", 0) list
+    putStrLn $ showEntry opt $ combine ("*total*", 0) list
 
 
 -- * Entry
