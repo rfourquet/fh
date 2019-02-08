@@ -1,7 +1,7 @@
 module Main where
 
 import           Control.Exception    (SomeException, try)
-import           Control.Monad        (forM_)
+import           Control.Monad        (forM, when)
 import qualified Crypto.Hash.SHA1     as SHA1
 import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BSL
@@ -59,11 +59,15 @@ options = info (parserOptions <**> helper)
 main :: IO ()
 main = do
   opt <- execParser options
-  forM_ (optPaths opt) $ \path -> do
+  list' <- forM (optPaths opt) $ \path -> do
     ent' <- mkEntry opt path
     case ent' of
-      Nothing  -> return ()
-      Just ent -> putStrLn $ showEntry opt ent
+      Nothing  -> return Nothing
+      Just ent -> do putStrLn $ showEntry opt ent
+                     return ent'
+  let list = catMaybes list'
+  when (optTotal opt) $
+    putStrLn $ showEntry opt $ combine opt ("*total*", 0) list
 
 
 -- * Entry
