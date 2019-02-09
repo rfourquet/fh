@@ -13,6 +13,7 @@ import           Options.Applicative  (Parser, ParserInfo, argument, execParser,
                                        fullDesc, help, helper, info, long, many,
                                        metavar, progDesc, short, str, switch,
                                        (<**>))
+import           Stat                 (fileBlockSize)
 import           System.Directory     (listDirectory)
 import           System.FilePath      ((</>))
 import           System.IO            (hPutStrLn, stderr)
@@ -27,6 +28,7 @@ import           Text.Printf          (printf)
 
 data Options = Options { _optSHA1 :: Bool
                        , _optSize :: Bool
+                       , optDU    :: Bool
                        , optTotal :: Bool
 
                        , optSI    :: Bool
@@ -36,7 +38,7 @@ data Options = Options { _optSHA1 :: Bool
                        }
 
 optOutUnspecified :: Options -> Bool
-optOutUnspecified opt = not (_optSHA1 opt || _optSize opt)
+optOutUnspecified opt = not (_optSHA1 opt || _optSize opt || optDU opt)
 
 optSHA1 :: Options -> Bool
 optSHA1 opt = optOutUnspecified opt || _optSHA1 opt
@@ -47,9 +49,11 @@ optSize opt = optOutUnspecified opt || _optSize opt
 parserOptions :: Parser Options
 parserOptions = Options
                 <$> switch (long "sha1" <> short 'x' <>
-                            help "print sha1 hash (in hexadecimal)")
+                            help "print sha1 hash (in hexadecimal) (DEFAULT)")
                 <*> switch (long "size" <> short 's' <>
-                            help "print (apparent) size")
+                            help "print (apparent) size (DEFAULT)")
+                <*> switch (long "disk-usage" <> short 'd' <>
+                            help "print actual size (disk usage) (EXPERIMENTAL)")
                 <*> switch (long "total" <> short 'c' <>
                             help "produce a grand total")
 
@@ -75,13 +79,14 @@ main = do
             sequence (mkEntry opt <$> optPaths opt)
   forM_ list $ putStrLn . showEntry opt
   when (optTotal opt) $
-    putStrLn $ showEntry opt $ combine ("*total*", 0) list
+    putStrLn $ showEntry opt $ combine ("*total*", 0, 0) list
 
 
 -- * Entry
 
 data Entry = Entry { _path :: FilePath
                    , _size :: Int
+                   , _du   :: Int
                    , _hash :: BS.ByteString
                    } deriving (Show)
 
@@ -95,28 +100,30 @@ mkEntry opt path = do
       return Nothing
     Right status
       | isRegularFile status ->
-          Just . Entry path size <$> sha1sum path
+          Just . Entry path size du <$> sha1sum path
       | isSymbolicLink status ->
-          Just . Entry path size . SHA1.hash . fromString <$> readSymbolicLink path
+          Just . Entry path size du . SHA1.hash . fromString <$> readSymbolicLink path
       | isDirectory status -> do
           files <- listDirectory path
           entries <- sequence $ mkEntry opt . (path </>) <$> sort files :: IO [Maybe Entry]
-          return $ Just $ combine (path, size) $ catMaybes entries
+          return $ Just $ combine (path, size, du) $ catMaybes entries
       | otherwise -> return Nothing
       where size = fromIntegral $ fileSize status
+            du   = fileBlockSize status * 512 -- TODO: check 512 is always valid
 
 
--- (name, s0) are "path" and non-cumulated (own) size for resulting Entry
-combine :: (String, Int) -> [Entry] -> Entry
-combine (name, s0) entries = finalize $ foldl' update (s0, SHA1.init) entries
-  where update (s, ctx) (Entry _ size hash) = (s+size, SHA1.update ctx hash)
-        finalize (s, ctx) = Entry name s $ SHA1.finalize ctx
+-- (name, s0, d0) are "path" and non-cumulated (own) size for resulting Entry
+combine :: (String, Int, Int) -> [Entry] -> Entry
+combine (name, s0, d0) entries = finalize $ foldl' update (s0, d0, SHA1.init) entries
+  where update (s, d, ctx) (Entry _ size du hash) = (s+size, d+du, SHA1.update ctx hash)
+        finalize (s, d, ctx) = Entry name s d $ SHA1.finalize ctx
 
 
 showEntry :: Options -> Entry -> String
-showEntry opt (Entry path size hash) =
+showEntry opt (Entry path size du hash) =
   let sp = if optSize opt then formatSize opt size ++ "  " ++ path else path
-  in if optSHA1 opt then hexlify hash ++ "  " ++ sp else sp
+      dsp = if optDU opt then formatSize opt du ++ "  " ++ sp else sp
+  in if optSHA1 opt then hexlify hash ++ "  " ++ dsp else dsp
 
 formatSize :: Options -> Int -> String
 formatSize opt sI =
