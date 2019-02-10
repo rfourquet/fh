@@ -7,7 +7,7 @@ import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BSL
 import           Data.Int             (Int64)
 import           Data.List            (find, foldl', sort, sortOn)
-import           Data.Maybe           (catMaybes, fromJust)
+import           Data.Maybe           (catMaybes, fromJust, fromMaybe)
 import           Data.String          (fromString)
 import           Numeric              (showHex)
 import           Options.Applicative  (Parser, ParserInfo, argument, execParser,
@@ -125,9 +125,19 @@ mkEntry opt db mps path = do
           Just . Entry path dev key ctime size du . Just . SHA1.hash . fromString <$>
             readSymbolicLink path
       | isDirectory status -> do
-          files <- listDirectory path
-          entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
-          return $ Just $ combine (path, dev, key, ctime, size, du) $ catMaybes entries
+          let newent put = do
+                files <- listDirectory path
+                entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
+                let dir = combine (path, dev, key, ctime, size, du) $ catMaybes entries
+                _ <- put db dbpath (key, ctime, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
+                return . Just $ dir
+          entry_ <- getDB db dbpath key
+          case entry_ of
+            Nothing -> newent insertDB
+            Just (_, _, s, d, h) ->
+              if optSHA1 opt && h == BS.empty
+              then newent updateDB
+              else return . Just $ Entry path dev key ctime s d (if BS.null h then Nothing else Just h)
       | otherwise -> return Nothing
       where key    = fromIntegral $ fileID status
             dev    = fromIntegral $ deviceID status
