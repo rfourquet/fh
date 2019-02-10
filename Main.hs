@@ -12,8 +12,7 @@ import           Data.String          (fromString)
 import           Numeric              (showHex)
 import           Options.Applicative  (Parser, ParserInfo, argument, execParser,
                                        fullDesc, help, helper, info, long, many,
-                                       metavar, progDesc, short, str, switch,
-                                       (<**>))
+                                       metavar, progDesc, short, str, switch)
 import           System.Directory     (listDirectory)
 import           System.FilePath      ((<.>), (</>))
 import           System.IO            (hPutStrLn, stderr)
@@ -30,15 +29,15 @@ import           Stat                 (fileBlockSize)
 
 -- * Options
 
-data Options = Options { _optSHA1 :: Bool
-                       , _optSize :: Bool
-                       , optDU    :: Bool
-                       , optTotal :: Bool
+data Options = Options { _optSHA1  :: Bool
+                       , _optSize  :: Bool
+                       , optDU     :: Bool
+                       , optTotal  :: Bool
 
-                       , optSI    :: Bool
-                       , optSort  :: Bool
+                       , optSI     :: Bool
+                       , optSort   :: Bool
 
-                       , optPaths :: [FilePath]
+                       , _optPaths :: [FilePath]
                        }
 
 optOutUnspecified :: Options -> Bool
@@ -49,6 +48,9 @@ optSHA1 opt = optOutUnspecified opt || _optSHA1 opt
 
 optSize :: Options -> Bool
 optSize opt = optOutUnspecified opt || _optSize opt
+
+optPaths :: Options -> [FilePath]
+optPaths opt = if null (_optPaths opt) then ["."] else _optPaths opt
 
 parserOptions :: Parser Options
 parserOptions = Options
@@ -66,10 +68,10 @@ parserOptions = Options
                 <*> switch (long "sort" <> short 'S' <>
                             help "sort output, according to size")
 
-                <*> many (argument str (metavar "PATHS..."))
+                <*> many (argument str (metavar "PATHS..." <> help "files or directories (default: \".\")"))
 
 options :: ParserInfo Options
-options = info (parserOptions <**> helper)
+options = info (helper <*> parserOptions)
           $  fullDesc
           <> progDesc "compute and cache the sha1 hash and size of files and directories"
 
