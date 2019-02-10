@@ -7,7 +7,7 @@ import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BSL
 import           Data.Int             (Int64)
 import           Data.List            (find, foldl', sort, sortOn)
-import           Data.Maybe           (catMaybes)
+import           Data.Maybe           (catMaybes, fromJust)
 import           Data.String          (fromString)
 import           Numeric              (showHex)
 import           Options.Applicative  (Parser, ParserInfo, argument, execParser,
@@ -99,7 +99,7 @@ data Entry = Entry { _path  :: FilePath
                    , _ctime :: Int64
                    , _size  :: Int
                    , _du    :: Int
-                   , _hash  :: BS.ByteString
+                   , _hash  :: Maybe BS.ByteString
                    } deriving (Show)
 
 
@@ -112,16 +112,17 @@ mkEntry opt db mps path = do
       return Nothing
     Right status
       | isRegularFile status -> do
-          let newent = Just . Entry path dev key ctime size du
+          let newent = return . Just . Entry path dev key ctime size du
           entry_ <- getDB db dbpath key
           case entry_ of
-            Nothing -> do h <- sha1sum path
-                          when (optSHA1 opt) $ -- necessary to compute the hash conditionally
-                            insertDB db dbpath (key, ctime, size, du, h)
-                          return $ newent h
-            Just (_, _, _, _, h) -> return $ newent h
+            Nothing -> if optSHA1 opt then do -- necessary to compute the hash conditionally
+                         h <- sha1sum path
+                         insertDB db dbpath (key, ctime, size, du, h)
+                         newent $ Just h
+                       else newent Nothing
+            Just (_, _, _, _, h) -> newent $ Just h
       | isSymbolicLink status ->
-          Just . Entry path dev key ctime size du . SHA1.hash . fromString <$>
+          Just . Entry path dev key ctime size du . Just . SHA1.hash . fromString <$>
             readSymbolicLink path
       | isDirectory status -> do
           files <- listDirectory path
@@ -139,16 +140,16 @@ mkEntry opt db mps path = do
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, Int64, Int64, Int64, Int, Int) -> [Entry] -> Entry
-combine (name, dev, key, ctime, s0, d0) entries = finalize $ foldl' update (s0, d0, SHA1.init) entries
-  where update (s, d, ctx) (Entry _ _ _ _ size du hash) = (s+size, d+du, SHA1.update ctx hash)
-        finalize (s, d, ctx) = Entry name dev key ctime s d $ SHA1.finalize ctx
+combine (name, dev, key, ctime, s0, d0) entries = finalize $ foldl' update (s0, d0, pure SHA1.init) entries
+  where update (s, d, ctx) (Entry _ _ _ _ size du hash) = (s+size, d+du, SHA1.update <$> ctx <*> hash)
+        finalize (s, d, ctx) = Entry name dev key ctime s d $ SHA1.finalize <$> ctx
 
 
 showEntry :: Options -> Entry -> String
 showEntry opt (Entry path _ _ _ size du hash) =
   let sp = if optSize opt then formatSize opt size ++ "  " ++ path else path
       dsp = if optDU opt then formatSize opt du ++ "  " ++ sp else sp
-  in if optSHA1 opt then hexlify hash ++ "  " ++ dsp else dsp
+  in if optSHA1 opt then hexlify (fromJust hash) ++ "  " ++ dsp else dsp
 
 formatSize :: Options -> Int -> String
 formatSize opt sI =
