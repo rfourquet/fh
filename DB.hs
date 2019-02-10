@@ -62,14 +62,17 @@ open' path = do
            \   size  INTEGER,                   \
            \   du    INTEGER,                   \
            \   sha1  BLOB                     ) "
+  exec db "BEGIN TRANSACTION"
   DB' path db
     <$> prepare db "INSERT INTO files values (?, ?, ?, ?, ?)"
     <*> prepare db "UPDATE files SET ctime=?, size=?, du=?, sha1=? WHERE key=?"
     <*> prepare db "SELECT * FROM files WHERE key=?"
 
 close' :: DB' -> IO ()
-close' db = mapM_ finalize [_ins db, _upd db, _get db] >>
-              close (_DB db)
+close' db = do
+    exec (_DB db) "END TRANSACTION"
+    mapM_ finalize [_ins db, _upd db, _get db]
+    close (_DB db)
 
 int :: Integral a => a -> SQLData
 int = SQLInteger . fromIntegral
