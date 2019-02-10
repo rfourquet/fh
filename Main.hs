@@ -1,7 +1,7 @@
 module Main where
 
 import           Control.Exception    (SomeException, try)
-import           Control.Monad        (forM_, when)
+import           Control.Monad        (forM_, when, (<=<))
 import qualified Crypto.Hash.SHA1     as SHA1
 import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BSL
@@ -85,9 +85,9 @@ main = do
   mps <- Mnt.points
   list <- (if optSort opt then sortOn _size else id) . catMaybes <$>
             sequence (mkEntry opt db mps <$> optPaths opt)
-  forM_ list $ putStrLn . showEntry opt
+  forM_ list $ putStrLn <=< showEntry opt
   when (optTotal opt) $
-    putStrLn $ showEntry opt $ combine ("*total*", 0, 0, 0, 0, 0) list
+    putStrLn <=< showEntry opt $ combine ("*total*", 0, 0, 0, 0, 0) list
   closeDB db
 
 
@@ -99,8 +99,17 @@ data Entry = Entry { _path  :: FilePath
                    , _ctime :: Int64
                    , _size  :: Int
                    , _du    :: Int
-                   , _hash  :: BS.ByteString
-                   } deriving (Show)
+                   , _hash  :: IO BS.ByteString
+                   }
+
+-- NOTE: we use IO BS.ByteString for _hash so that the evaluation of the sha1 hash
+-- is delayed until needed for printing, without running into "Lazy IO" problems
+-- (e.g. "resource exhausted (Too many open files)").
+-- Storing hashes in the DB forces full evaluation at once, and hopefully helps
+-- keeping the number of open file handles small.
+-- It would also be solved with forcing the evaluation right away, but we then loose
+-- a small feature: when running the program with the "sort on sizes" option,
+-- the first results can start being displayed before all the hashes have been computed.
 
 
 mkEntry :: Options -> DB -> [Mnt.Point] -> FilePath -> IO (Maybe Entry)
@@ -111,17 +120,16 @@ mkEntry opt db mps path = do
       hPutStrLn stderr $ "error: " ++ show exception
       return Nothing
     Right status
-      | isRegularFile status -> do
-          let newent = Just . Entry path dev key ctime size du
-          entry_ <- getDB db dbpath key
-          case entry_ of
-            Nothing -> do h <- sha1sum path
-                          when (optSHA1 opt) $ -- necessary to compute the hash conditionally
+      | isRegularFile status ->
+          return . Just . Entry path dev key ctime size du $ do
+            entry_ <- getDB db dbpath key
+            case entry_ of
+              Nothing -> do h <- sha1sum path
                             insertDB db dbpath (key, ctime, size, du, h)
-                          return $ newent h
-            Just (_, _, _, _, h) -> return $ newent h
+                            return h
+              Just (_, _, _, _, h) -> return h
       | isSymbolicLink status ->
-          Just . Entry path dev key ctime size du . SHA1.hash . fromString <$>
+          Just . Entry path dev key ctime size du . return . SHA1.hash . fromString <$>
             readSymbolicLink path
       | isDirectory status -> do
           files <- listDirectory path
@@ -139,16 +147,18 @@ mkEntry opt db mps path = do
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, Int64, Int64, Int64, Int, Int) -> [Entry] -> Entry
-combine (name, dev, key, ctime, s0, d0) entries = finalize $ foldl' update (s0, d0, SHA1.init) entries
-  where update (s, d, ctx) (Entry _ _ _ _ size du hash) = (s+size, d+du, SHA1.update ctx hash)
-        finalize (s, d, ctx) = Entry name dev key ctime s d $ SHA1.finalize ctx
+combine (name, dev, key, ctime, s0, d0) entries = finalize $ foldl' update (s0, d0, return SHA1.init) entries
+  where update (s, d, ctx) (Entry _ _ _ _ size du hash) = (s+size, d+du, SHA1.update <$> ctx <*> hash)
+        finalize (s, d, ctx) = Entry name dev key ctime s d $ SHA1.finalize <$> ctx
 
 
-showEntry :: Options -> Entry -> String
+showEntry :: Options -> Entry -> IO String
 showEntry opt (Entry path _ _ _ size du hash) =
   let sp = if optSize opt then formatSize opt size ++ "  " ++ path else path
       dsp = if optDU opt then formatSize opt du ++ "  " ++ sp else sp
-  in if optSHA1 opt then hexlify hash ++ "  " ++ dsp else dsp
+  in if optSHA1 opt
+     then (++ "  " ++ dsp) . hexlify <$> hash
+     else return dsp
 
 formatSize :: Options -> Int -> String
 formatSize opt sI =
