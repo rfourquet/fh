@@ -116,7 +116,8 @@ mkEntry opt db mps path = do
           entry_ <- getDB db dbpath key
           case entry_ of
             Nothing -> do h <- sha1sum path
-                          insertDB db dbpath (key, ctime, size, du, h)
+                          when (optSHA1 opt) $ -- necessary to compute the hash conditionally
+                            insertDB db dbpath (key, ctime, size, du, h)
                           return $ newent h
             Just (_, _, _, _, h) -> return $ newent h
       | isSymbolicLink status ->
