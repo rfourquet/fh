@@ -9,7 +9,7 @@ import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy  as BSL
 import           Data.Int              (Int64)
 import           Data.List             (find, foldl', sort, sortOn)
-import           Data.Maybe            (catMaybes, fromJust, fromMaybe)
+import           Data.Maybe            (catMaybes, fromMaybe)
 import           Data.String           (fromString)
 import           Data.Word             (Word32)
 import           Numeric               (showHex)
@@ -134,17 +134,19 @@ mkEntry :: Options -> DB -> [Mnt.Point] -> FilePath -> IO (Maybe Entry)
 mkEntry opt db mps path = do
   status' <- try (getSymbolicLinkStatus path) :: IO (Either SomeException FileStatus)
   case status' of
-    Left exception -> do
-      hPutStrLn stderr $ "error: " ++ show exception
-      return Nothing
+    Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
+                         return Nothing
     Right status
       | isRegularFile status -> do
           let newent' = return . Just . Entry path mode key ctime size du
               newent put = if optSHA1 opt -- DB access is not lazy so a guard is needed
                            then do
-                             h <- sha1sum path
-                             _ <- put db dbpath (key, ctime, size, du, h)
-                             newent' $ Just h
+                             h' <- try $ sha1sum path :: IO (Either SomeException BS.ByteString)
+                             case h' of
+                               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
+                                                    newent' Nothing
+                               Right h -> do _ <- put db dbpath (key, ctime, size, du, h)
+                                             newent' $ Just h
                            else newent' Nothing
           entry_ <- getDB db dbpath key
           case entry_ of
@@ -158,11 +160,18 @@ mkEntry opt db mps path = do
             readSymbolicLink path
       | isDirectory status -> do
           let newent put = do
-                files <- listDirectory path
-                entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
-                let dir = combine (path, mode, key, ctime, size, du) $ catMaybes entries
-                _ <- put db dbpath (key, ctime, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
-                return . Just $ dir
+                files' <- try (listDirectory path) :: IO (Either SomeException [FilePath])
+                case files' of
+                  Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
+                                       return . Just $ Entry path mode (-1) ctime size du Nothing
+                  Right files -> do
+                    entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
+                    let dir = combine (path, mode, key, ctime, size, du) $ catMaybes entries
+                    unless (_key dir == -1) $
+                      -- if the above condition is true, a read error occured somewhere and the info
+                      -- can't reliably be stored into the DB
+                      put db dbpath (key, ctime, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
+                    return . Just $ dir
           let hcompat h = not (BS.null h && optSHA1 opt)
           entry_ <- getDB db dbpath key
           case entry_ of
@@ -185,15 +194,15 @@ mkEntry opt db mps path = do
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, Word32, Int64, Int64, Int, Int) -> [Entry] -> Entry
-combine (name, mode, key, ctime, s0, d0) entries = finalize $ foldl' update (s0, d0, pure SHA1.init) entries
-  where update (s, d, ctx) (Entry n m _ _ size du hash) =
-          (s+size, d+du, SHA1.update <$> ctx <*>
+combine (name, mode, k0, ctime, s0, d0) entries = finalize $ foldl' update (k0, s0, d0, pure SHA1.init) entries
+  where update (k, s, d, ctx) (Entry n m k' _ size du hash) =
+          (if k' == -1 then k' else k, s+size, d+du, SHA1.update <$> ctx <*>
               fmap BS.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack $ takeFileName n, Just $ BS.singleton 0]))
               -- The mode of a file has no effect on its hash, only on its containing dir's hash;
               -- this is similar to how git does.
               -- We add '\0' (`singleton 0`) to be sure that 2 unequal dirs won't have the same hash;
               -- this assumes '\0' can't be in a file name.
-        finalize (s, d, ctx) = Entry name mode key ctime s d $ SHA1.finalize <$> ctx
+        finalize (k, s, d, ctx) = Entry name mode k ctime s d $ SHA1.finalize <$> ctx
         pack32 m = BS.pack $ fromIntegral <$> [m, m `shiftR` 8, m `shiftR` 16, m `shiftR` 24]
 
 
@@ -201,7 +210,8 @@ showEntry :: Options -> Entry -> String
 showEntry opt (Entry path _ _ _ size du hash) =
   let sp = if optSize opt then formatSize opt size ++ "  " ++ path else path
       dsp = if optDU opt then formatSize opt du ++ "  " ++ sp else sp
-  in if optSHA1 opt then hexlify (fromJust hash) ++ "  " ++ dsp else dsp
+  in if optSHA1 opt -- if hash is still Nothing, there was an I/O error
+     then maybe (replicate 40 '0') hexlify hash ++ "  " ++ dsp else dsp
 
 formatSize :: Options -> Int -> String
 formatSize opt sI =
