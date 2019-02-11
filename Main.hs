@@ -1,32 +1,32 @@
 module Main where
 
-import           Control.Exception    (SomeException, try)
-import           Control.Monad        (forM_, when)
-import qualified Crypto.Hash.SHA1     as SHA1
-import qualified Data.ByteString      as BS
-import qualified Data.ByteString.Lazy as BSL
-import           Data.Int             (Int64)
-import           Data.List            (find, foldl', sort, sortOn)
-import           Data.Maybe           (catMaybes, fromJust, fromMaybe)
-import           Data.String          (fromString)
-import           Data.Word            (Word32)
-import           Numeric              (showHex)
-import           Options.Applicative  (Parser, ParserInfo, argument, execParser,
-                                       fullDesc, help, helper, info, long, many,
-                                       metavar, progDesc, short, str, switch)
-import           System.Directory     (listDirectory)
-import           System.FilePath      ((<.>), (</>))
-import           System.IO            (hPutStrLn, stderr)
-import           System.Posix.Files   (FileStatus, deviceID, fileID, fileMode,
-                                       fileSize, getSymbolicLinkStatus,
-                                       isDirectory, isRegularFile,
-                                       isSymbolicLink, readSymbolicLink,
-                                       statusChangeTimeHiRes)
-import           Text.Printf          (printf)
+import           Control.Exception     (SomeException, try)
+import           Control.Monad         (forM_, when)
+import qualified Crypto.Hash.SHA1      as SHA1
+import           Data.Bits             (shiftR)
+import qualified Data.ByteString       as BS
+import qualified Data.ByteString.Char8 as Char8
+import qualified Data.ByteString.Lazy  as BSL
+import           Data.Int              (Int64)
+import           Data.List             (find, foldl', sort, sortOn)
+import           Data.Maybe            (catMaybes, fromJust, fromMaybe)
+import           Data.String           (fromString)
+import           Data.Word             (Word32)
+import           Numeric               (showHex)
+import           Options.Applicative   (Parser, ParserInfo, argument, execParser, fullDesc, help,
+                                        helper, info, long, many, metavar, progDesc, short, str,
+                                        switch)
+import           System.Directory      (listDirectory)
+import           System.FilePath       (takeFileName, (<.>), (</>))
+import           System.IO             (hPutStrLn, stderr)
+import           System.Posix.Files    (FileStatus, deviceID, fileID, fileMode, fileSize,
+                                        getSymbolicLinkStatus, isDirectory, isRegularFile,
+                                        isSymbolicLink, readSymbolicLink, statusChangeTimeHiRes)
+import           Text.Printf           (printf)
 
 import           DB
 import qualified Mnt
-import           Stat                 (fileBlockSize)
+import           Stat                  (fileBlockSize)
 
 
 -- * Options
@@ -154,8 +154,15 @@ mkEntry opt db mps path = do
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, Word32, Int64, Int64, Int, Int) -> [Entry] -> Entry
 combine (name, mode, key, ctime, s0, d0) entries = finalize $ foldl' update (s0, d0, pure SHA1.init) entries
-  where update (s, d, ctx) (Entry _ _ _ _ size du hash) = (s+size, d+du, SHA1.update <$> ctx <*> hash)
+  where update (s, d, ctx) (Entry n m _ _ size du hash) =
+          (s+size, d+du, SHA1.update <$> ctx <*>
+              fmap BS.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack $ takeFileName n, Just $ BS.singleton 0]))
+              -- The mode of a file has no effect on its hash, only on its containing dir's hash;
+              -- this is similar to how git does.
+              -- We add '\0' (`singleton 0`) to be sure that 2 unequal dirs won't have the same hash;
+              -- this assumes '\0' can't be in a file name.
         finalize (s, d, ctx) = Entry name mode key ctime s d $ SHA1.finalize <$> ctx
+        pack32 m = BS.pack $ fromIntegral <$> [m, m `shiftR` 8, m `shiftR` 16, m `shiftR` 24]
 
 
 showEntry :: Options -> Entry -> String
