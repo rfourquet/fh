@@ -9,6 +9,7 @@ import           Data.Int             (Int64)
 import           Data.List            (find, foldl', sort, sortOn)
 import           Data.Maybe           (catMaybes, fromJust, fromMaybe)
 import           Data.String          (fromString)
+import           Data.Word            (Word32)
 import           Numeric              (showHex)
 import           Options.Applicative  (Parser, ParserInfo, argument, execParser,
                                        fullDesc, help, helper, info, long, many,
@@ -16,10 +17,11 @@ import           Options.Applicative  (Parser, ParserInfo, argument, execParser,
 import           System.Directory     (listDirectory)
 import           System.FilePath      ((<.>), (</>))
 import           System.IO            (hPutStrLn, stderr)
-import           System.Posix.Files   (FileStatus, deviceID, fileID, fileSize,
-                                       getSymbolicLinkStatus, isDirectory,
-                                       isRegularFile, isSymbolicLink,
-                                       readSymbolicLink, statusChangeTimeHiRes)
+import           System.Posix.Files   (FileStatus, deviceID, fileID, fileMode,
+                                       fileSize, getSymbolicLinkStatus,
+                                       isDirectory, isRegularFile,
+                                       isSymbolicLink, readSymbolicLink,
+                                       statusChangeTimeHiRes)
 import           Text.Printf          (printf)
 
 import           DB
@@ -94,7 +96,7 @@ main = do
 -- * Entry
 
 data Entry = Entry { _path  :: FilePath
-                   , _devid :: Int64
+                   , _mode  :: Word32
                    , _key   :: Int64
                    , _ctime :: Int64
                    , _size  :: Int
@@ -112,7 +114,7 @@ mkEntry opt db mps path = do
       return Nothing
     Right status
       | isRegularFile status -> do
-          let newent = return . Just . Entry path dev key ctime size du
+          let newent = return . Just . Entry path mode key ctime size du
           entry_ <- getDB db dbpath key
           case entry_ of
             Nothing -> if optSHA1 opt then do -- necessary to compute the hash conditionally
@@ -122,13 +124,13 @@ mkEntry opt db mps path = do
                        else newent Nothing
             Just (_, _, _, _, h) -> newent $ Just h
       | isSymbolicLink status ->
-          Just . Entry path dev key ctime size du . Just . SHA1.hash . fromString <$>
+          Just . Entry path mode key ctime size du . Just . SHA1.hash . fromString <$>
             readSymbolicLink path
       | isDirectory status -> do
           let newent put = do
                 files <- listDirectory path
                 entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
-                let dir = combine (path, dev, key, ctime, size, du) $ catMaybes entries
+                let dir = combine (path, mode, key, ctime, size, du) $ catMaybes entries
                 _ <- put db dbpath (key, ctime, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
                 return . Just $ dir
           entry_ <- getDB db dbpath key
@@ -137,10 +139,11 @@ mkEntry opt db mps path = do
             Just (_, _, s, d, h) ->
               if optSHA1 opt && h == BS.empty
               then newent updateDB
-              else return . Just $ Entry path dev key ctime s d (if BS.null h then Nothing else Just h)
+              else return . Just $ Entry path mode key ctime s d (if BS.null h then Nothing else Just h)
       | otherwise -> return Nothing
       where key    = fromIntegral $ fileID status
             dev    = fromIntegral $ deviceID status
+            mode   = fromIntegral $ fileMode status
             ctime  = ceiling $ 10^(9::Int) * statusChangeTimeHiRes status
             size   = fromIntegral $ fileSize status
             du     = fileBlockSize status * 512 -- TODO: check 512 is always valid
@@ -149,10 +152,10 @@ mkEntry opt db mps path = do
 
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
-combine :: (String, Int64, Int64, Int64, Int, Int) -> [Entry] -> Entry
-combine (name, dev, key, ctime, s0, d0) entries = finalize $ foldl' update (s0, d0, pure SHA1.init) entries
+combine :: (String, Word32, Int64, Int64, Int, Int) -> [Entry] -> Entry
+combine (name, mode, key, ctime, s0, d0) entries = finalize $ foldl' update (s0, d0, pure SHA1.init) entries
   where update (s, d, ctx) (Entry _ _ _ _ size du hash) = (s+size, d+du, SHA1.update <$> ctx <*> hash)
-        finalize (s, d, ctx) = Entry name dev key ctime s d $ SHA1.finalize <$> ctx
+        finalize (s, d, ctx) = Entry name mode key ctime s d $ SHA1.finalize <$> ctx
 
 
 showEntry :: Options -> Entry -> String
