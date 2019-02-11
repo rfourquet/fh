@@ -89,7 +89,8 @@ main = do
             sequence (mkEntry opt db mps <$> optPaths opt)
   forM_ list $ putStrLn . showEntry opt
   when (optTotal opt) $
-    putStrLn $ showEntry opt $ combine ("*total*", 0, 0, 0, 0, 0) list
+    putStrLn $ showEntry opt $ combine ("*total*", 0, 0, 0, 0, 0)
+                                       (sortOn (takeFileName . _path) list)
   closeDB db
 
 
