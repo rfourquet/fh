@@ -13,9 +13,10 @@ import           Data.Maybe            (catMaybes, fromJust, fromMaybe)
 import           Data.String           (fromString)
 import           Data.Word             (Word32)
 import           Numeric               (showHex)
-import           Options.Applicative   (Parser, ParserInfo, argument, execParser, fullDesc, help,
-                                        helper, info, long, many, metavar, progDesc, short, str,
-                                        switch)
+import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, execParser,
+                                        footer, fullDesc, help, helper, info, long, many, metavar,
+                                        option, progDesc, readerError, short, showDefault, str,
+                                        switch, value)
 import           System.Directory      (listDirectory)
 import           System.FilePath       (takeFileName, (<.>), (</>))
 import           System.IO             (hPutStrLn, stderr)
@@ -36,6 +37,7 @@ data Options = Options { _optSHA1  :: Bool
                        , optDU     :: Bool
                        , optTotal  :: Bool
 
+                       , optCLevel :: CacheLevel
                        , optSI     :: Bool
                        , optSort   :: Bool
 
@@ -65,6 +67,8 @@ parserOptions = Options
                 <*> switch (long "total" <> short 'c' <>
                             help "produce a grand total")
 
+                <*> option clevel (long "cache-level" <> short 'l' <> showDefault <> value 1 <> metavar "INT" <>
+                                   help "policy for cache use, in 0..3")
                 <*> switch (long "si" <> short 't' <>
                             help "use powers of 1000 instead of 1024 for sizes")
                 <*> switch (long "sort" <> short 'S' <>
@@ -76,6 +80,18 @@ options :: ParserInfo Options
 options = info (helper <*> parserOptions)
           $  fullDesc
           <> progDesc "compute and cache the sha1 hash and size of files and directories"
+          <> footer "Cache level l: the cache (hash and size) is used if: \
+                    \ l >= 1 and ctime of a file did not change (since cached), \
+                    \ l >= 2 and ctime of a directory did not change, or l == 3."
+
+type CacheLevel = Int
+
+clevel :: ReadM CacheLevel
+clevel = do
+  i <- auto
+  if 0 <= i && i <= 3
+    then return i
+    else readerError "cache level isn't in the range 0..3"
 
 
 -- * main
@@ -115,15 +131,20 @@ mkEntry opt db mps path = do
       return Nothing
     Right status
       | isRegularFile status -> do
-          let newent = return . Just . Entry path mode key ctime size du
+          let newent' = return . Just . Entry path mode key ctime size du
+              newent put = if optSHA1 opt -- DB access is not lazy so a guard is needed
+                           then do
+                             h <- sha1sum path
+                             _ <- put db dbpath (key, ctime, size, du, h)
+                             newent' $ Just h
+                           else newent' Nothing
           entry_ <- getDB db dbpath key
           case entry_ of
-            Nothing -> if optSHA1 opt then do -- necessary to compute the hash conditionally
-                         h <- sha1sum path
-                         insertDB db dbpath (key, ctime, size, du, h)
-                         newent $ Just h
-                       else newent Nothing
-            Just (_, _, _, _, h) -> newent $ Just h
+            Nothing -> newent insertDB
+            Just (_, t, _, _, h)
+              | (cl == 1 || cl == 2) && t == ctime -> newent' $ Just h
+              | cl == 3                            -> newent' $ Just h
+              | otherwise                          -> newent updateDB
       | isSymbolicLink status ->
           Just . Entry path mode key ctime size du . Just . SHA1.hash . fromString <$>
             readSymbolicLink path
@@ -134,13 +155,15 @@ mkEntry opt db mps path = do
                 let dir = combine (path, mode, key, ctime, size, du) $ catMaybes entries
                 _ <- put db dbpath (key, ctime, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
                 return . Just $ dir
+          let hcompat h = not (BS.null h && optSHA1 opt)
           entry_ <- getDB db dbpath key
           case entry_ of
             Nothing -> newent insertDB
-            Just (_, _, s, d, h) ->
-              if optSHA1 opt && h == BS.empty
-              then newent updateDB
-              else return . Just $ Entry path mode key ctime s d (if BS.null h then Nothing else Just h)
+            Just (_, t, s, d, h)
+              | cl == 2 && t == ctime && hcompat h -> newent'
+              | cl == 3 && hcompat h               -> newent'
+              | otherwise                          -> newent updateDB
+              where newent' = return . Just $ Entry path mode key ctime s d (if BS.null h then Nothing else Just h)
       | otherwise -> return Nothing
       where key    = fromIntegral $ fileID status
             dev    = fromIntegral $ deviceID status
@@ -150,7 +173,7 @@ mkEntry opt db mps path = do
             du     = fileBlockSize status * 512 -- TODO: check 512 is always valid
             uuid   = find ((== dev) . Mnt.devid) mps >>= Mnt.uuid :: Maybe String
             dbpath = (\x -> "/var/cache/fh" </> x <.> "db") <$> uuid :: Maybe FilePath
-
+            cl     = optCLevel opt
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, Word32, Int64, Int64, Int, Int) -> [Entry] -> Entry
