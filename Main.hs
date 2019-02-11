@@ -1,7 +1,7 @@
 module Main where
 
 import           Control.Exception     (SomeException, try)
-import           Control.Monad         (forM_, when)
+import           Control.Monad         (forM, forM_, unless, when)
 import qualified Crypto.Hash.SHA1      as SHA1
 import           Data.Bits             (shiftR)
 import qualified Data.ByteString       as BS
@@ -101,9 +101,17 @@ main = do
   opt <- execParser options
   db <- newDB
   mps <- Mnt.points
-  list <- (if optSort opt then sortOn _size else id) . catMaybes <$>
-            sequence (mkEntry opt db mps <$> optPaths opt)
-  forM_ list $ putStrLn . showEntry opt
+
+  list_ <- forM (mkEntry opt db mps <$> optPaths opt) $ \entIO_ -> do
+    ent_ <- entIO_
+    case ent_ of
+      Nothing -> return Nothing
+      Just ent -> do
+        unless (optSort opt) (putStrLn . showEntry opt $ ent)
+        return ent_
+
+  let list = catMaybes list_
+  when (optSort opt) $ forM_ (sortOn _size list) (putStrLn . showEntry opt)
   when (optTotal opt) $
     putStrLn $ showEntry opt $ combine ("*total*", 0, 0, 0, 0, 0)
                                        (sortOn (takeFileName . _path) list)
