@@ -1,6 +1,6 @@
 module Main where
 
-import           Control.Exception     (SomeException, bracket, try)
+import           Control.Exception     (IOException, bracket, try)
 import           Control.Monad         (forM, forM_, unless, when)
 import qualified Crypto.Hash.SHA1      as SHA1
 import           Data.Bits             (shiftR)
@@ -131,7 +131,7 @@ data Entry = Entry { _path  :: FilePath
 
 mkEntry :: Options -> DB -> [Mnt.Point] -> FilePath -> IO (Maybe Entry)
 mkEntry opt db mps path = do
-  status' <- try (getSymbolicLinkStatus path) :: IO (Either SomeException FileStatus)
+  status' <- try (getSymbolicLinkStatus path) :: IO (Either IOException FileStatus)
   case status' of
     Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                          return Nothing
@@ -140,7 +140,7 @@ mkEntry opt db mps path = do
           let newent' = return . Just . Entry path mode key ctime size du
               newent put = if optSHA1 opt -- DB access is not lazy so a guard is needed
                            then do
-                             h' <- try $ sha1sum path :: IO (Either SomeException BS.ByteString)
+                             h' <- try $ sha1sum path :: IO (Either IOException BS.ByteString)
                              case h' of
                                Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                                     newent' Nothing
@@ -159,7 +159,7 @@ mkEntry opt db mps path = do
             readSymbolicLink path
       | isDirectory status -> do
           let newent put = do
-                files' <- try (listDirectory path) :: IO (Either SomeException [FilePath])
+                files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
                 case files' of
                   Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                        return . Just $ Entry path mode (-1) ctime size du Nothing
