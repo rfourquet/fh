@@ -9,7 +9,7 @@ import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy  as BSL
 import           Data.Int              (Int64)
 import           Data.List             (find, foldl', sort, sortOn)
-import           Data.Maybe            (catMaybes, fromMaybe)
+import           Data.Maybe            (catMaybes, fromJust, fromMaybe)
 import           Data.String           (fromString)
 import           Data.Word             (Word32)
 import           Numeric               (showHex)
@@ -217,8 +217,8 @@ formatSize opt sI =
   let u0:units = (if optSI opt then (++"B") else id) <$>
                  [" ", "k", "M", "G", "T", "P", "E", "Z", "Y"]
       base = if optSI opt then 1000.0 else 1024.0
-      (s', u) = head $ dropWhile (\(s, _) -> s >= 1000.0) $
-                         scanl (\(s, _) f' ->  (s / base, f')) (fromIntegral sI :: Double, u0) units
+      (s', u) = fromJust $ find (\(s, _) -> s < 1000.0) $
+                  scanl (\(s, _) f' ->  (s / base, f')) (fromIntegral sI :: Double, u0) units
   in printf (if head u == ' ' then "%3.f  %s" else "%5.1f%s") s' u
 
 
