@@ -1,6 +1,6 @@
 module Main where
 
-import           Control.Exception     (SomeException, try)
+import           Control.Exception     (SomeException, bracket, try)
 import           Control.Monad         (forM, forM_, unless, when)
 import qualified Crypto.Hash.SHA1      as SHA1
 import           Data.Bits             (shiftR)
@@ -99,23 +99,22 @@ clevel = do
 main :: IO ()
 main = do
   opt <- execParser options
-  db <- newDB
-  mps <- Mnt.points
+  bracket newDB closeDB $ \db -> do
+    mps <- Mnt.points
 
-  list_ <- forM (mkEntry opt db mps <$> optPaths opt) $ \entIO_ -> do
-    ent_ <- entIO_
-    case ent_ of
-      Nothing -> return Nothing
-      Just ent -> do
-        unless (optSort opt) (putStrLn . showEntry opt $ ent)
-        return ent_
+    list_ <- forM (mkEntry opt db mps <$> optPaths opt) $ \entIO_ -> do
+      ent_ <- entIO_
+      case ent_ of
+        Nothing -> return Nothing
+        Just ent -> do
+          unless (optSort opt) (putStrLn . showEntry opt $ ent)
+          return ent_
 
-  let list = catMaybes list_
-  when (optSort opt) $ forM_ (sortOn _size list) (putStrLn . showEntry opt)
-  when (optTotal opt) $
-    putStrLn $ showEntry opt $ combine ("*total*", 0, 0, 0, 0, 0)
-                                       (sortOn (takeFileName . _path) list)
-  closeDB db
+    let list = catMaybes list_
+    when (optSort opt) $ forM_ (sortOn _size list) (putStrLn . showEntry opt)
+    when (optTotal opt) $
+      putStrLn $ showEntry opt $ combine ("*total*", 0, 0, 0, 0, 0)
+                                         (sortOn (takeFileName . _path) list)
 
 
 -- * Entry
