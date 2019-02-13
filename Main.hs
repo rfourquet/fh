@@ -15,8 +15,7 @@ import           Data.Word             (Word32)
 import           Numeric               (showHex)
 import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, execParser,
                                         footer, fullDesc, help, helper, info, long, many, metavar,
-                                        option, progDesc, readerError, short, showDefault, str,
-                                        switch, value)
+                                        option, progDesc, readerError, short, str, switch, value)
 import           System.Directory      (listDirectory)
 import           System.FilePath       (takeFileName, (<.>), (</>))
 import           System.IO             (hPutStrLn, stderr)
@@ -33,17 +32,17 @@ import           Stat                  (fileBlockSize)
 
 -- * Options
 
-data Options = Options { _optSHA1  :: Bool
-                       , _optSize  :: Bool
-                       , optDU     :: Bool
-                       , optTotal  :: Bool
+data Options = Options { _optSHA1   :: Bool
+                       , _optSize   :: Bool
+                       , optDU      :: Bool
+                       , optTotal   :: Bool
 
-                       , optCLevel :: CacheLevel
-                       , optMtime  :: Bool
-                       , optSI     :: Bool
-                       , optSort   :: Bool
+                       , _optCLevel :: CacheLevel
+                       , optMtime   :: Bool
+                       , optSI      :: Bool
+                       , optSort    :: Bool
 
-                       , _optPaths :: [FilePath]
+                       , _optPaths  :: [FilePath]
                        }
 
 optOutUnspecified :: Options -> Bool
@@ -58,6 +57,11 @@ optSize opt = optOutUnspecified opt || _optSize opt
 optPaths :: Options -> [FilePath]
 optPaths opt = if null (_optPaths opt) then ["."] else _optPaths opt
 
+optCLevel :: Options -> CacheLevel
+optCLevel opt | _optCLevel opt == -1 && optSHA1 opt       = 1
+              | _optCLevel opt == -1 && not (optSHA1 opt) = 2
+              | otherwise                                 = _optCLevel opt
+
 parserOptions :: Parser Options
 parserOptions = Options
                 <$> switch (long "sha1" <> short 'x' <>
@@ -69,8 +73,8 @@ parserOptions = Options
                 <*> switch (long "total" <> short 'c' <>
                             help "produce a grand total")
 
-                <*> option clevel (long "cache-level" <> short 'l' <> showDefault <> value 1 <> metavar "INT" <>
-                                   help "policy for cache use, in 0..3")
+                <*> option clevel (long "cache-level" <> short 'l' <> value (-1) <> metavar "INT" <>
+                                   help "policy for cache use, in 0..3 (default: 1 or 2)")
                 <*> switch (long "mtime" <> short 'm' <>
                             help "use mtime instead of ctime to interpret cache level")
                 <*> switch (long "si" <> short 't' <>
@@ -89,7 +93,10 @@ options = info (helper <*> parserOptions)
                     \ l >= 2 and the timestamp of a directory is compatible, \
                     \ or l == 3. \
                     \ The timestamp is said \"compatible\" if ctime (or mtime with the -m option) \
-                    \ is older than the time of caching."
+                    \ is older than the time of caching. \
+                    \ The default value of l is 1 when hashes are requested (should be reliable in most cases) \
+                    \ and 2 when only the size is requested (this avoids to recursively traverse directories, \
+                    \ which would then be no better than du)."
 
 type CacheLevel = Int
 
