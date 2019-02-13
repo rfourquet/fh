@@ -187,7 +187,7 @@ mkEntry opt db mps path = do
               | cl == 3 && hcompat h               -> newent'
               | otherwise                          -> newent updateDB
               where newent' = return . Just $ Entry path mode key ctime s d (if BS.null h then Nothing else Just h)
-      | otherwise -> return Nothing
+      | otherwise -> return . Just . Entry path mode key ctime size du . Just $ BS.pack $ replicate 20 0
       where key    = fromIntegral $ fileID status
             dev    = fromIntegral $ deviceID status
             mode   = fromIntegral $ fileMode status
@@ -217,7 +217,7 @@ showEntry opt (Entry path _ _ _ size du hash) =
   let sp = if optSize opt then formatSize opt size ++ "  " ++ path else path
       dsp = if optDU opt then formatSize opt du ++ "  " ++ sp else sp
   in if optSHA1 opt -- if hash is still Nothing, there was an I/O error
-     then maybe (replicate 40 '0') hexlify hash ++ "  " ++ dsp else dsp
+     then maybe (replicate 40 'x') hexlify hash ++ "  " ++ dsp else dsp
 
 formatSize :: Options -> Int -> String
 formatSize opt sI =
