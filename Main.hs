@@ -158,8 +158,12 @@ mkEntry opt db mps path = do
                   | otherwise                          -> newent updateDB
             else newent' Nothing
       | isSymbolicLink status ->
-          Just . Entry path mode key ctime size du . Just . SHA1.hash . fromString <$>
-            readSymbolicLink path
+          -- we compute hash conditionally as directories containing only symlinks will otherwise
+          -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
+          -- seems the make the matter worse (requiring then to make the hash field strict...)
+          Just . Entry path mode key ctime size du <$>
+            if optSHA1 opt then Just . SHA1.hash . fromString <$> readSymbolicLink path
+                           else return Nothing
       | isDirectory status -> do
           let newent put = do
                 files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
