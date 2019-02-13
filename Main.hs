@@ -138,22 +138,25 @@ mkEntry opt db mps path = do
     Right status
       | isRegularFile status -> do
           let newent' = return . Just . Entry path mode key ctime size du
-              newent put = if optSHA1 opt -- DB access is not lazy so a guard is needed
-                           then do
-                             h' <- try $ sha1sum path :: IO (Either IOException BS.ByteString)
-                             case h' of
-                               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
-                                                    newent' Nothing
-                               Right h -> do _ <- put db dbpath (key, ctime, size, du, h)
-                                             newent' $ Just h
-                           else newent' Nothing
-          entry_ <- getDB db dbpath key
-          case entry_ of
-            Nothing -> newent insertDB
-            Just (_, t, _, _, h)
-              | (cl == 1 || cl == 2) && t == ctime -> newent' $ Just h
-              | cl == 3                            -> newent' $ Just h
-              | otherwise                          -> newent updateDB
+              newent put = do
+                h' <- try $ sha1sum path :: IO (Either IOException BS.ByteString)
+                case h' of
+                  Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
+                                       newent' Nothing
+                  Right h        -> do _ <- put db dbpath (key, ctime, size, du, h)
+                                       newent' $ Just h
+          if optSHA1 opt
+            -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
+            -- we can as well avoid the getDB call in this case, as a small optimization
+            then do
+              entry_ <- getDB db dbpath key
+              case entry_ of
+                Nothing -> newent insertDB
+                Just (_, t, _, _, h)
+                  | (cl == 1 || cl == 2) && t == ctime -> newent' $ Just h
+                  | cl == 3                            -> newent' $ Just h
+                  | otherwise                          -> newent updateDB
+            else newent' Nothing
       | isSymbolicLink status ->
           Just . Entry path mode key ctime size du . Just . SHA1.hash . fromString <$>
             readSymbolicLink path
