@@ -58,14 +58,15 @@ open' path = do
   db <- open $ fromString path
   exec db  " CREATE TABLE IF NOT EXISTS files ( \
            \   key   INTEGER PRIMARY KEY,       \
-           \   ctime INTEGER,                   \
+           \   utime INTEGER,                   \
            \   size  INTEGER,                   \
            \   du    INTEGER,                   \
            \   sha1  BLOB                     ) "
+  -- utime: update time
   exec db "BEGIN TRANSACTION"
   DB' path db
     <$> prepare db "INSERT INTO files values (?, ?, ?, ?, ?)"
-    <*> prepare db "UPDATE files SET ctime=?, size=?, du=?, sha1=? WHERE key=?"
+    <*> prepare db "UPDATE files SET utime=?, size=?, du=?, sha1=? WHERE key=?"
     <*> prepare db "SELECT * FROM files WHERE key=?"
 
 close' :: DB' -> IO ()
@@ -78,16 +79,16 @@ int :: Integral a => a -> SQLData
 int = SQLInteger . fromIntegral
 
 insert' :: Entry -> DB' -> IO ()
-insert' (key, ctime, size, du, sha1) db = do
+insert' (key, utime, size, du, sha1) db = do
   let ins = _ins db
-  bind ins [int key, int ctime, int size, int du, SQLBlob sha1]
+  bind ins [int key, int utime, int size, int du, SQLBlob sha1]
   _ <- step ins
   reset ins
 
 update' :: Entry -> DB' -> IO ()
-update' (key, ctime, size, du, sha1) db = do
+update' (key, utime, size, du, sha1) db = do
   let upd = _upd db
-  bind upd [int ctime, int size, int du, SQLBlob sha1, int key]
+  bind upd [int utime, int size, int du, SQLBlob sha1, int key]
   _ <- step upd
   reset upd
 
@@ -100,6 +101,6 @@ get' key db = do
   case res of
     Done -> return Nothing
     Row -> do
-      [_, SQLInteger ctime, SQLInteger size, SQLInteger du, SQLBlob sha1] <-
+      [_, SQLInteger utime, SQLInteger size, SQLInteger du, SQLBlob sha1] <-
         typedColumns get $ replicate 4 (Just IntegerColumn) ++ [Just BlobColumn]
-      return $ Just (key, ctime, fromIntegral size, fromIntegral du, sha1)
+      return $ Just (key, utime, fromIntegral size, fromIntegral du, sha1)
