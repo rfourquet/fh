@@ -7,7 +7,6 @@ import           Data.Bits             (shiftR)
 import qualified Data.ByteString       as BS
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy  as BSL
-import           Data.Int              (Int64)
 import           Data.List             (find, foldl', sort, sortOn)
 import           Data.Maybe            (catMaybes, fromJust, fromMaybe)
 import           Data.String           (fromString)
@@ -121,18 +120,18 @@ main = do
     let list = catMaybes list_
     when (optSort opt) $ forM_ (sortOn _size list) (putStrLn . showEntry opt)
     when (optTotal opt) $
-      putStrLn $ showEntry opt $ combine ("*total*", 0, 0, 0, 0)
+      putStrLn $ showEntry opt $ combine ("*total*", 0, True, 0, 0)
                                          (sortOn (takeFileName . _path) list)
 
 
 -- * Entry
 
-data Entry = Entry { _path :: FilePath
-                   , _mode :: Word32
-                   , _key  :: Int64
-                   , _size :: Int
-                   , _du   :: Int
-                   , _hash :: Maybe BS.ByteString
+data Entry = Entry { _path   :: FilePath
+                   , _mode   :: Word32
+                   , _sizeOK :: Bool -- size and du are reliable
+                   , _size   :: Int
+                   , _du     :: Int
+                   , _hash   :: Maybe BS.ByteString
                    } deriving (Show)
 
 
@@ -145,7 +144,7 @@ mkEntry opt db mps path = do
                          return Nothing
     Right status
       | isRegularFile status -> do
-          let newent' = return . Just . Entry path mode key size du
+          let newent' = return . Just . Entry path mode True size du
               newent put = do
                 h' <- try $ sha1sum path :: IO (Either IOException BS.ByteString)
                 case h' of
@@ -169,7 +168,7 @@ mkEntry opt db mps path = do
           -- we compute hash conditionally as directories containing only symlinks will otherwise
           -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
           -- seems the make the matter worse (requiring then to make the hash field strict...)
-          Just . Entry path mode key size du <$>
+          Just . Entry path mode True size du <$>
             if optSHA1 opt then Just . SHA1.hash . fromString <$> readSymbolicLink path
                            else return Nothing
       | isDirectory status -> do
@@ -177,11 +176,11 @@ mkEntry opt db mps path = do
                 files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
                 case files' of
                   Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
-                                       return . Just $ Entry path mode (-1) size du Nothing
+                                       return . Just $ Entry path mode False size du Nothing
                   Right files -> do
                     entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
-                    let dir = combine (path, mode, key, size, du) $ catMaybes entries
-                    unless (_key dir == -1) $
+                    let dir = combine (path, mode, True, size, du) $ catMaybes entries
+                    when (_sizeOK dir) $
                       -- if the above condition is true, a read error occured somewhere and the info
                       -- can't reliably be stored into the DB
                       put db dbpath (key, now, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
@@ -194,8 +193,8 @@ mkEntry opt db mps path = do
               | cl == 2 && t >= cmtime && hcompat h -> newent'
               | cl == 3 && hcompat h                -> newent'
               | otherwise                           -> newent updateDB
-              where newent' = return . Just $ Entry path mode key s d (if BS.null h then Nothing else Just h)
-      | otherwise -> return . Just . Entry path mode key size du . Just $ BS.pack $ replicate 20 0
+              where newent' = return . Just $ Entry path mode True s d (if BS.null h then Nothing else Just h)
+      | otherwise -> return . Just . Entry path mode True size du . Just $ BS.pack $ replicate 20 0
       where key    = fromIntegral $ fileID status
             dev    = fromIntegral $ deviceID status
             mode   = fromIntegral $ fileMode status
@@ -208,16 +207,16 @@ mkEntry opt db mps path = do
             cl     = optCLevel opt
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
-combine :: (String, Word32, Int64, Int, Int) -> [Entry] -> Entry
-combine (name, mode, k0, s0, d0) entries = finalize $ foldl' update (k0, s0, d0, pure SHA1.init) entries
-  where update (k, s, d, ctx) (Entry n m k' size du hash) =
-          (if k' == -1 then k' else k, s+size, d+du, SHA1.update <$> ctx <*>
+combine :: (String, Word32, Bool, Int, Int) -> [Entry] -> Entry
+combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d0, pure SHA1.init) entries
+  where update (ok, s, d, ctx) (Entry n m ok' size du hash) =
+          (ok && ok', s+size, d+du, SHA1.update <$> ctx <*>
               fmap BS.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack $ takeFileName n, Just $ BS.singleton 0]))
               -- The mode of a file has no effect on its hash, only on its containing dir's hash;
               -- this is similar to how git does.
               -- We add '\0' (`singleton 0`) to be sure that 2 unequal dirs won't have the same hash;
               -- this assumes '\0' can't be in a file name.
-        finalize (k, s, d, ctx) = Entry name mode k s d $ SHA1.finalize <$> ctx
+        finalize (ok, s, d, ctx) = Entry name mode ok s d $ SHA1.finalize <$> ctx
         pack32 m = BS.pack $ fromIntegral <$> [m, m `shiftR` 8, m `shiftR` 16, m `shiftR` 24]
 
 
