@@ -23,7 +23,8 @@ import           System.FilePath       (takeFileName, (<.>), (</>))
 import           System.IO             (hPutStrLn, stderr)
 import           System.Posix.Files    (FileStatus, deviceID, fileID, fileMode, fileSize,
                                         getSymbolicLinkStatus, isDirectory, isRegularFile,
-                                        isSymbolicLink, readSymbolicLink, statusChangeTimeHiRes)
+                                        isSymbolicLink, modificationTimeHiRes, readSymbolicLink,
+                                        statusChangeTimeHiRes)
 import           Text.Printf           (printf)
 
 import           DB
@@ -39,6 +40,7 @@ data Options = Options { _optSHA1  :: Bool
                        , optTotal  :: Bool
 
                        , optCLevel :: CacheLevel
+                       , optMtime  :: Bool
                        , optSI     :: Bool
                        , optSort   :: Bool
 
@@ -70,6 +72,8 @@ parserOptions = Options
 
                 <*> option clevel (long "cache-level" <> short 'l' <> showDefault <> value 1 <> metavar "INT" <>
                                    help "policy for cache use, in 0..3")
+                <*> switch (long "mtime" <> short 'm' <>
+                            help "use mtime instead of ctime to interpret cache level")
                 <*> switch (long "si" <> short 't' <>
                             help "use powers of 1000 instead of 1024 for sizes")
                 <*> switch (long "sort" <> short 'S' <>
@@ -82,8 +86,11 @@ options = info (helper <*> parserOptions)
           $  fullDesc
           <> progDesc "compute and cache the sha1 hash and size of files and directories"
           <> footer "Cache level l: the cache (hash and size) is used if: \
-                    \ l >= 1 and ctime of a file did not change (since cached), \
-                    \ l >= 2 and ctime of a directory did not change, or l == 3."
+                    \ l >= 1 and the timestamp of a file is compatible, \
+                    \ l >= 2 and the timestamp of a directory is compatible, \
+                    \ or l == 3. \
+                    \ The timestamp is said \"compatible\" if ctime (or mtime with the -m option) \
+                    \ is older than the time of caching."
 
 type CacheLevel = Int
 
@@ -154,9 +161,9 @@ mkEntry opt db mps path = do
               case entry_ of
                 Nothing -> newent insertDB
                 Just (_, t, _, _, h)
-                  | (cl == 1 || cl == 2) && t >= ctime -> newent' $ Just h
-                  | cl == 3                            -> newent' $ Just h
-                  | otherwise                          -> newent updateDB
+                  | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
+                  | cl == 3                             -> newent' $ Just h
+                  | otherwise                           -> newent updateDB
             else newent' Nothing
       | isSymbolicLink status ->
           -- we compute hash conditionally as directories containing only symlinks will otherwise
@@ -184,15 +191,15 @@ mkEntry opt db mps path = do
           case entry_ of
             Nothing -> newent insertDB
             Just (_, t, s, d, h)
-              | cl == 2 && t >= ctime && hcompat h -> newent'
-              | cl == 3 && hcompat h               -> newent'
-              | otherwise                          -> newent updateDB
+              | cl == 2 && t >= cmtime && hcompat h -> newent'
+              | cl == 3 && hcompat h                -> newent'
+              | otherwise                           -> newent updateDB
               where newent' = return . Just $ Entry path mode key s d (if BS.null h then Nothing else Just h)
       | otherwise -> return . Just . Entry path mode key size du . Just $ BS.pack $ replicate 20 0
       where key    = fromIntegral $ fileID status
             dev    = fromIntegral $ deviceID status
             mode   = fromIntegral $ fileMode status
-            ctime  = ceiling $ 10^(9::Int) * statusChangeTimeHiRes status
+            cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
             now    = ceiling $ 10^(9::Int) * now'
             size   = fromIntegral $ fileSize status
             du     = fileBlockSize status * 512 -- TODO: check 512 is always valid
