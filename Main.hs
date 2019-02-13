@@ -169,7 +169,7 @@ mkEntry opt db mps path = do
           -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
           -- seems the make the matter worse (requiring then to make the hash field strict...)
           Just . Entry path mode True size du <$>
-            if optSHA1 opt then Just . SHA1.hash . fromString <$> readSymbolicLink path
+            if optSHA1 opt then Just <$> sha1sumSymlink path
                            else return Nothing
       | isDirectory status -> do
           let newent put = do
@@ -208,7 +208,7 @@ mkEntry opt db mps path = do
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, Word32, Bool, Int, Int) -> [Entry] -> Entry
-combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d0, pure SHA1.init) entries
+combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d0, pure dirCtx) entries
   where update (ok, s, d, ctx) (Entry n m ok' size du hash) =
           (ok && ok', s+size, d+du, SHA1.update <$> ctx <*>
               fmap BS.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack $ takeFileName n, Just $ BS.singleton 0]))
@@ -238,6 +238,19 @@ formatSize opt sI =
 
 
 -- * sha1 hash
+
+-- random seed for dirs
+dirCtx :: SHA1.Ctx
+dirCtx = SHA1.update SHA1.init $ BS.pack [0x2a, 0xc9, 0xd8, 0x3b, 0xc8, 0x7c, 0xe4, 0x86, 0xb2, 0x41,
+                                          0xd2, 0x27, 0xb4, 0x06, 0x93, 0x60, 0xc6, 0x2b, 0x52, 0x37]
+
+-- random seed for symlinks
+symlinkCtx :: SHA1.Ctx
+symlinkCtx = SHA1.update SHA1.init $ BS.pack [0x05, 0xfe, 0x0d, 0x17, 0xac, 0x9a, 0x10, 0xbc, 0x7d, 0xb1,
+                                              0x73, 0x99, 0xa6, 0xea, 0x92, 0x38, 0xfa, 0xda, 0x0f, 0x16]
+
+sha1sumSymlink :: FilePath -> IO BS.ByteString
+sha1sumSymlink path = SHA1.finalize . SHA1.update symlinkCtx . fromString <$> readSymbolicLink path
 
 sha1sum :: FilePath -> IO BS.ByteString
 sha1sum = fmap SHA1.hashlazy . BSL.readFile
