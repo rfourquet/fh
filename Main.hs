@@ -8,7 +8,7 @@ import qualified Data.ByteString       as BS
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy  as BSL
 import           Data.List             (find, foldl', sort, sortOn)
-import           Data.Maybe            (catMaybes, fromJust, fromMaybe)
+import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust)
 import           Data.String           (fromString)
 import           Data.Time.Clock.POSIX
 import           Data.Word             (Word32)
@@ -114,7 +114,7 @@ main :: IO ()
 main = do
   opt <- execParser options
   bracket newDB closeDB $ \db -> do
-    mps <- Mnt.points
+    mps <- filter (isJust . Mnt.uuid) <$> Mnt.points
 
     list_ <- forM (mkEntry opt db mps <$> optPaths opt) $ \entIO_ -> do
       ent_ <- entIO_
