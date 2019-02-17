@@ -1,14 +1,17 @@
+{-# LANGUAGE MultiWayIf #-}
+
 module Main where
 
 import           Control.Exception     (IOException, bracket, try)
 import           Control.Monad         (forM, forM_, unless, when)
 import qualified Crypto.Hash.SHA1      as SHA1
-import           Data.Bits             (shiftR)
+import           Data.Bits             (shiftL, shiftR)
 import qualified Data.ByteString       as BS
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy  as BSL
+import           Data.Int              (Int64)
 import           Data.List             (find, foldl', sort, sortOn)
-import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust)
+import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust, isNothing)
 import           Data.String           (fromString)
 import           Data.Time.Clock.POSIX
 import           Data.Word             (Word32)
@@ -16,8 +19,8 @@ import           Numeric               (showHex)
 import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, execParser,
                                         footer, fullDesc, help, helper, info, long, many, metavar,
                                         option, progDesc, readerError, short, str, switch, value)
-import           System.Directory      (listDirectory)
-import           System.FilePath       (takeFileName, (<.>), (</>))
+import           System.Directory      (canonicalizePath, listDirectory)
+import           System.FilePath       (makeRelative, takeFileName, (<.>), (</>))
 import           System.IO             (hPutStrLn, stderr)
 import           System.Posix.Files    (FileStatus, deviceID, fileID, fileMode, fileSize,
                                         getSymbolicLinkStatus, isDirectory, isRegularFile,
@@ -149,69 +152,85 @@ mkEntry opt db mps path = do
   case status' of
     Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                          return Nothing
-    Right status
-      | isRegularFile status -> do
-          let newent' = return . Just . Entry path mode True size du
-              newent put = do
-                h' <- try $ sha1sum path :: IO (Either IOException BS.ByteString)
-                case h' of
-                  Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
-                                       newent' Nothing
-                  Right h        -> do _ <- put db dbpath (key, now, size, du, h)
-                                       newent' $ Just h
-          if optSHA1 opt
-            -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
-            -- we can as well avoid the getDB call in this case, as a small optimization
-            then do
-              entry_ <- getDB db dbpath key
-              case entry_ of
-                Nothing -> newent insertDB
-                Just (_, t, _, _, h)
-                  | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
-                  | cl == 3                             -> newent' $ Just h
-                  | otherwise                           -> newent updateDB
-            else newent' Nothing
-      | isSymbolicLink status ->
-          -- we compute hash conditionally as directories containing only symlinks will otherwise
-          -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
-          -- seems the make the matter worse (requiring then to make the hash field strict...)
-          Just . Entry path mode True size du <$>
-            if optSHA1 opt then Just <$> sha1sumSymlink path
-                           else return Nothing
-      | isDirectory status -> do
-          let newent put = do
-                files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
-                case files' of
-                  Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
-                                       return . Just $ Entry path mode False size du Nothing
-                  Right files -> do
-                    entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
-                    let dir = combine (path, mode, True, size, du) $ catMaybes entries
-                    when (_sizeOK dir) $
-                      -- if the above condition is true, a read error occured somewhere and the info
-                      -- can't reliably be stored into the DB
-                      put db dbpath (key, now, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
-                    return . Just $ dir
-          let hcompat h = not (BS.null h && optSHA1 opt)
-          entry_ <- getDB db dbpath key
-          case entry_ of
-            Nothing -> newent insertDB
-            Just (_, t, s, d, h)
-              | cl == 2 && t >= cmtime && hcompat h -> newent'
-              | cl == 3 && hcompat h                -> newent'
-              | otherwise                           -> newent updateDB
-              where newent' = return . Just $ Entry path mode True s d (if BS.null h then Nothing else Just h)
-      | otherwise -> return . Just . Entry path mode True size du . Just $ BS.pack $ replicate 20 0
-      where key    = fromIntegral $ fileID status
-            dev    = fromIntegral $ deviceID status
-            mode   = fromIntegral $ fileMode status
-            cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
-            now    = ceiling $ 10^(9::Int) * now'
-            size   = fromIntegral $ fileSize status
-            du     = fileBlockSize status * 512 -- TODO: check 512 is always valid
-            uuid   = find ((== dev) . Mnt.devid) mps >>= Mnt.uuid :: Maybe String
-            dbpath = (\x -> "/var/cache/fh" </> x <.> "db") <$> uuid :: Maybe FilePath
-            cl     = optCLevel opt
+    Right status -> do
+      when (isNothing mp) $
+        hPutStrLn stderr ("warning: mount point not found for device: " ++ show dev)
+      key <- maybe (return 0) (mkKey status path) mp -- key won't be used when mp == Nothing, so 0 is irrelevant
+      if
+       | isRegularFile status -> do
+           let newent' = return . Just . Entry path mode True size du
+               newent put = do
+                 h' <- try $ sha1sum path :: IO (Either IOException BS.ByteString)
+                 case h' of
+                   Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
+                                        newent' Nothing
+                   Right h        -> do _ <- put db dbpath (key, now, size, du, h)
+                                        newent' $ Just h
+           if optSHA1 opt
+             -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
+             -- we can as well avoid the getDB call in this case, as a small optimization
+             then do
+               entry_ <- getDB db dbpath key
+               case entry_ of
+                 Nothing -> newent insertDB
+                 Just (_, t, _, _, h)
+                   | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
+                   | cl == 3                             -> newent' $ Just h
+                   | otherwise                           -> newent updateDB
+             else newent' Nothing
+       | isSymbolicLink status ->
+           -- we compute hash conditionally as directories containing only symlinks will otherwise
+           -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
+           -- seems the make the matter worse (requiring then to make the hash field strict...)
+           Just . Entry path mode True size du <$>
+             if optSHA1 opt then Just <$> sha1sumSymlink path
+                            else return Nothing
+       | isDirectory status -> do
+           let newent put = do
+                 files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
+                 case files' of
+                   Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
+                                        return . Just $ Entry path mode False size du Nothing
+                   Right files -> do
+                     entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
+                     let dir = combine (path, mode, True, size, du) $ catMaybes entries
+                     when (_sizeOK dir) $
+                       -- if the above condition is true, a read error occured somewhere and the info
+                       -- can't reliably be stored into the DB
+                       put db dbpath (key, now, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
+                     return . Just $ dir
+           let hcompat h = not (BS.null h && optSHA1 opt)
+           entry_ <- getDB db dbpath key
+           case entry_ of
+             Nothing -> newent insertDB
+             Just (_, t, s, d, h)
+               | cl == 2 && t >= cmtime && hcompat h -> newent'
+               | cl == 3 && hcompat h                -> newent'
+               | otherwise                           -> newent updateDB
+               where newent' = return . Just $ Entry path mode True s d (if BS.null h then Nothing else Just h)
+       | otherwise -> return . Just . Entry path mode True size du . Just $ BS.pack $ replicate 20 0
+       where mode   = fromIntegral $ fileMode status
+             cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
+             now    = ceiling $ 10^(9::Int) * now'
+             size   = fromIntegral $ fileSize status
+             du     = fileBlockSize status * 512 -- TODO: check 512 is always valid
+             dev    = fromIntegral $ deviceID status
+             mp     = find ((== dev) . Mnt.devid) mps
+             uuid   = mp >>= Mnt.uuid :: Maybe String
+             dbpath = (\x -> "/var/cache/fh" </> x <.> "db") <$> uuid :: Maybe FilePath
+             cl     = optCLevel opt
+
+
+mkKey :: FileStatus -> FilePath -> Mnt.Point -> IO Int64
+mkKey status path mp =
+  if Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
+  then return $ fromIntegral $ fileID status
+  else do
+    realpath <- canonicalizePath path
+    let hash = BS.unpack . SHA1.hash . fromString $ makeRelative (Mnt.target mp) realpath
+        h64  = fromIntegral <$> hash :: [Int64]
+    return $ sum [w `shiftL` i | (w, i) <- zip h64 [0, 8..]]
+
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, Word32, Bool, Int, Int) -> [Entry] -> Entry
