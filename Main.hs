@@ -91,14 +91,16 @@ options :: ParserInfo Options
 options = info (helper <*> parserOptions)
           $  fullDesc
           <> progDesc "compute and cache the sha1 hash and size of files and directories"
-          <> footer "Cache level l: the cache (hash and size) is used if: \
-                    \ l >= 1 and the timestamp of a file is compatible, \
-                    \ l >= 2 and the timestamp of a directory is compatible, \
-                    \ or l == 3. \
-                    \ The timestamp is said \"compatible\" if ctime (or mtime with the -m option) \
-                    \ is older than the time of caching. \
+          <> footer "Cache level l: the cache (hash and size) is used if:                                      \
+                    \ l ≥ 1 and the timestamp of a file is compatible,                                         \
+                    \ l ≥ 2 and the timestamp of a directory is compatible,                                    \
+                    \ or l = 3.                                                                                \
+                    \ The timestamp is said \"compatible\" if ctime (or mtime with the -m option)              \
+                    \ is older than the time of caching.                                                       \
+                    \ When the size of a file has changed since cached, the hash is unconditionally            \
+                    \ re-computed (even when l = 3).                                                           \
                     \ The default value of l is 1 when hashes are requested (should be reliable in most cases) \
-                    \ and 2 when only the size is requested (this avoids to recursively traverse directories, \
+                    \ and 2 when only the size is requested (this avoids to recursively traverse directories,  \
                     \ which would then be no better than du)."
 
 type CacheLevel = Int
@@ -173,7 +175,8 @@ mkEntry opt db mps path = do
                entry_ <- getDB db dbpath key
                case entry_ of
                  Nothing -> newent insertDB
-                 Just (_, t, _, _, h)
+                 Just (_, t, s, _, h)
+                   | s /= size                           -> newent updateDB
                    | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
                    | cl == 3                             -> newent' $ Just h
                    | otherwise                           -> newent updateDB
