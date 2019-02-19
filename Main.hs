@@ -36,6 +36,7 @@ import           Stat                  (fileBlockSize)
 -- * Options
 
 data Options = Options { _optSHA1   :: Bool
+                       , optHID     :: Bool
                        , _optSize   :: Bool
                        , optDU      :: Bool
                        , optTotal   :: Bool
@@ -49,10 +50,13 @@ data Options = Options { _optSHA1   :: Bool
                        }
 
 optOutUnspecified :: Options -> Bool
-optOutUnspecified opt = not (_optSHA1 opt || _optSize opt || optDU opt)
+optOutUnspecified opt = not (_optSHA1 opt || optHID opt || _optSize opt || optDU opt)
 
 optSHA1 :: Options -> Bool
 optSHA1 opt = optOutUnspecified opt || _optSHA1 opt
+
+optSHA1' :: Options -> Bool -- whether sha1 must be computed
+optSHA1' opt = optSHA1 opt || optHID opt
 
 optSize :: Options -> Bool
 optSize opt = optOutUnspecified opt || _optSize opt
@@ -61,14 +65,16 @@ optPaths :: Options -> [FilePath]
 optPaths opt = if null (_optPaths opt) then ["."] else _optPaths opt
 
 optCLevel :: Options -> CacheLevel
-optCLevel opt | _optCLevel opt == -1 && optSHA1 opt       = 1
-              | _optCLevel opt == -1 && not (optSHA1 opt) = 2
-              | otherwise                                 = _optCLevel opt
+optCLevel opt | _optCLevel opt == -1 && optSHA1' opt       = 1
+              | _optCLevel opt == -1 && not (optSHA1' opt) = 2
+              | otherwise                                  = _optCLevel opt
 
 parserOptions :: Parser Options
 parserOptions = Options
                 <$> switch (long "sha1" <> short 'x' <>
                             help "print sha1 hash (in hexadecimal) (DEFAULT)")
+                <*> switch (long "hid" <> short '#' <>
+                            help "print unique (system-wide) integer ID corresponding to sha1 hash")
                 <*> switch (long "size" <> short 's' <>
                             help "print (apparent) size (DEFAULT)")
                 <*> switch (long "disk-usage" <> short 'd' <>
@@ -119,6 +125,13 @@ main :: IO ()
 main = do
   opt <- execParser options
   bracket newDB closeDB $ \db -> do
+
+    let printEntry ent = do
+          hid <- if optHID opt
+                   then sequence $ getHID db <$> _hash ent
+                   else return Nothing
+          putStrLn . showEntry opt hid $ ent
+
     mps <- filter (isJust . Mnt.uuid) <$> Mnt.points
 
     list_ <- forM (mkEntry opt db mps <$> optPaths opt) $ \entIO_ -> do
@@ -126,14 +139,14 @@ main = do
       case ent_ of
         Nothing -> return Nothing
         Just ent -> do
-          unless (optSort opt) (putStrLn . showEntry opt $ ent)
+          unless (optSort opt) (printEntry ent)
           return ent_
 
     let list = catMaybes list_
-    when (optSort opt) $ forM_ (sortOn _size list) (putStrLn . showEntry opt)
+    when (optSort opt) $ forM_ (sortOn _size list) printEntry
     when (optTotal opt) $
-      putStrLn $ showEntry opt $ combine ("*total*", 0, True, 0, 0)
-                                         (sortOn (takeFileName . _path) list)
+      printEntry $ combine ("*total*", 0, True, 0, 0)
+                           (sortOn (takeFileName . _path) list)
 
 
 -- * Entry
@@ -168,7 +181,7 @@ mkEntry opt db mps path = do
                                         newent' Nothing
                    Right h        -> do _ <- put db dbpath (key, now, size, du, h)
                                         newent' $ Just h
-           if optSHA1 opt
+           if optSHA1' opt
              -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
              -- we can as well avoid the getDB call in this case, as a small optimization
              then do
@@ -186,8 +199,8 @@ mkEntry opt db mps path = do
            -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
            -- seems the make the matter worse (requiring then to make the hash field strict...)
            Just . Entry path mode True size du <$>
-             if optSHA1 opt then Just <$> sha1sumSymlink path
-                            else return Nothing
+             if optSHA1' opt then Just <$> sha1sumSymlink path
+                             else return Nothing
        | isDirectory status -> do
            let newent put = do
                  files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
@@ -202,7 +215,7 @@ mkEntry opt db mps path = do
                        -- can't reliably be stored into the DB
                        put db dbpath (key, now, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
                      return . Just $ dir
-           let hcompat h = not (BS.null h && optSHA1 opt)
+           let hcompat h = not (BS.null h && optSHA1' opt)
            entry_ <- getDB db dbpath key
            case entry_ of
              Nothing -> newent insertDB
@@ -249,12 +262,22 @@ combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d
         pack32 m = BS.pack $ fromIntegral <$> [m, m `shiftR` 8, m `shiftR` 16, m `shiftR` 24]
 
 
-showEntry :: Options -> Entry -> String
-showEntry opt (Entry path _ _ size du hash) =
-  let sp = if optSize opt then formatSize opt size ++ "  " ++ path else path
-      dsp = if optDU opt then formatSize opt du ++ "  " ++ sp else sp
-  in if optSHA1 opt -- if hash is still Nothing, there was an I/O error
-     then maybe (replicate 40 'x') hexlify hash ++ "  " ++ dsp else dsp
+-- * display
+
+showEntry :: Options -> Maybe Int64 -> Entry -> String
+showEntry opt hid (Entry path _ _ size du hash) =
+  let sp   = if optSize opt then formatSize opt size ++ "  " ++ path  else path
+      dsp  = if optDU opt then formatSize opt du ++ "  " ++ sp        else sp
+      hdsp = if optSHA1 opt -- if hash is still Nothing, there was an I/O error
+             then maybe (replicate 40 '*') hexlify hash ++ "  " ++ dsp else dsp
+      in formatHashID opt hid ++ hdsp
+
+formatHashID :: Options -> Maybe Int64 -> String
+formatHashID opt hid =
+  if optHID opt
+  then let s = "#" ++ maybe "*" show hid
+       in printf "%5s  " s
+  else ""
 
 formatSize :: Options -> Int -> String
 formatSize opt sI =
