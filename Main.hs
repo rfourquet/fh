@@ -21,7 +21,8 @@ import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, aut
                                         option, progDesc, readerError, short, str, switch, value)
 import           System.Directory      (canonicalizePath, listDirectory)
 import           System.FilePath       (makeRelative, takeFileName, (<.>), (</>))
-import           System.IO             (hPutStrLn, stderr)
+import           System.IO             (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
+                                        mkTextEncoding, stderr, stdin, stdout)
 import           System.Posix.Files    (FileStatus, deviceID, fileID, fileMode, fileSize,
                                         getSymbolicLinkStatus, isDirectory, isRegularFile,
                                         isSymbolicLink, modificationTimeHiRes, readSymbolicLink,
@@ -123,6 +124,8 @@ clevel = do
 
 main :: IO ()
 main = do
+  mapM_ mkTranslitEncoding [stdout, stderr, stdin]
+
   opt <- execParser options
   bracket newDB closeDB $ \db -> do
 
@@ -147,6 +150,12 @@ main = do
     when (optTotal opt) $
       printEntry $ combine ("*total*", 0, True, 0, 0)
                            (sortOn (takeFileName . _path) list)
+
+
+mkTranslitEncoding :: Handle -> IO ()
+mkTranslitEncoding h =
+  hGetEncoding h >>= mapM_ (\enc ->
+    hSetEncoding h =<< mkTextEncoding (takeWhile (/= '/') (show enc) ++ "//TRANSLIT"))
 
 
 -- * Entry
