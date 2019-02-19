@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module DB (DB, closeDB, getDB, getHID, insertDB, newDB, updateDB) where
+module DB (DB, DBEntry, closeDB, getDB, getHID, insertDB, newDB, updateDB) where
 
 import           Control.Monad    (forM, forM_, join, mapM_, (>=>))
 import qualified Data.ByteString  as BS
@@ -14,7 +14,7 @@ import           Database.SQLite3 (ColumnType (..), Database, SQLData (..), Stat
 -- * public API
 
 type DB = IORef (Maybe DB', Maybe IDMap)
-type Entry = (Int64, Int64, Int, Int, BS.ByteString)
+type DBEntry = (Int64, Int64, Int, Int, BS.ByteString, BS.ByteString)
 
 newDB :: IO DB
 newDB = newIORef (Nothing, Nothing)
@@ -25,13 +25,13 @@ closeDB db = do
   mapM_ close' db'
   mapM_ closeM dbm
 
-insertDB :: DB -> Maybe FilePath -> Entry -> IO ()
+insertDB :: DB -> Maybe FilePath -> DBEntry -> IO ()
 insertDB db path entry = forM_ path $ setDB db >=> insert' entry
 
-updateDB :: DB -> Maybe FilePath -> Entry -> IO ()
+updateDB :: DB -> Maybe FilePath -> DBEntry -> IO ()
 updateDB db path entry = forM_ path $ setDB db >=> update' entry
 
-getDB :: DB -> Maybe FilePath -> Int64 -> IO (Maybe Entry)
+getDB :: DB -> Maybe FilePath -> Int64 -> IO (Maybe DBEntry)
 getDB db path key = fmap join . forM path $ setDB db >=> get' key
 
 getHID :: DB -> BS.ByteString -> IO Int64
@@ -69,12 +69,13 @@ open' path = do
            \   utime INTEGER,                   \
            \   size  INTEGER,                   \
            \   du    INTEGER,                   \
-           \   sha1  BLOB                     ) "
+           \   sha1  BLOB,                      \
+           \   hpath BLOB                     ) "
   -- utime: update time
   exec db "BEGIN TRANSACTION"
   DB' path db
-    <$> prepare db "INSERT INTO files values (?, ?, ?, ?, ?)"
-    <*> prepare db "UPDATE files SET utime=?, size=?, du=?, sha1=? WHERE key=?"
+    <$> prepare db "INSERT INTO files values (?, ?, ?, ?, ?, ?)"
+    <*> prepare db "UPDATE files SET utime=?, size=?, du=?, sha1=?, hpath=? WHERE key=?"
     <*> prepare db "SELECT * FROM files WHERE key=?"
 
 close' :: DB' -> IO ()
@@ -86,21 +87,21 @@ close' db = do
 int :: Integral a => a -> SQLData
 int = SQLInteger . fromIntegral
 
-insert' :: Entry -> DB' -> IO ()
-insert' (key, utime, size, du, sha1) db = do
+insert' :: DBEntry -> DB' -> IO ()
+insert' (key, utime, size, du, sha1, hpath) db = do
   let ins = _ins db
-  bind ins [int key, int utime, int size, int du, SQLBlob sha1]
+  bind ins [int key, int utime, int size, int du, SQLBlob sha1, SQLBlob hpath]
   _ <- step ins
   reset ins
 
-update' :: Entry -> DB' -> IO ()
-update' (key, utime, size, du, sha1) db = do
+update' :: DBEntry -> DB' -> IO ()
+update' (key, utime, size, du, sha1, hpath) db = do
   let upd = _upd db
-  bind upd [int utime, int size, int du, SQLBlob sha1, int key]
+  bind upd [int utime, int size, int du, SQLBlob sha1, SQLBlob hpath, int key]
   _ <- step upd
   reset upd
 
-get' :: Int64 -> DB' -> IO (Maybe Entry)
+get' :: Int64 -> DB' -> IO (Maybe DBEntry)
 get' key db = do
   let get = _get db
   reset get
@@ -109,9 +110,9 @@ get' key db = do
   case res of
     Done -> return Nothing
     Row -> do
-      [_, SQLInteger utime, SQLInteger size, SQLInteger du, SQLBlob sha1] <-
-        typedColumns get $ replicate 4 (Just IntegerColumn) ++ [Just BlobColumn]
-      return $ Just (key, utime, fromIntegral size, fromIntegral du, sha1)
+      [_, SQLInteger utime, SQLInteger size, SQLInteger du, SQLBlob sha1, SQLBlob hpath] <-
+        typedColumns get $ replicate 4 (Just IntegerColumn) ++ [Just BlobColumn, Just BlobColumn]
+      return $ Just (key, utime, fromIntegral size, fromIntegral du, sha1, hpath)
 
 
 -- ** Hash ID

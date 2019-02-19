@@ -170,7 +170,7 @@ mkEntry opt db mps path = do
     Right status -> do
       when (isNothing mp) $
         hPutStrLn stderr ("warning: mount point not found for device: " ++ show dev)
-      key <- maybe (return 0) (mkKey status path) mp -- key won't be used when mp == Nothing, so 0 is irrelevant
+      key <- maybe (return NoKey) (mkKey status path) mp -- key won't be used when mp == Nothing
       if
        | isRegularFile status -> do
            let newent' = return . Just . Entry path mode True size du
@@ -179,17 +179,18 @@ mkEntry opt db mps path = do
                  case h' of
                    Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                         newent' Nothing
-                   Right h        -> do _ <- put db dbpath (key, now, size, du, h)
+                   Right h        -> do _ <- put db dbpath $ mkDBEntry (key, now, size, du, h)
                                         newent' $ Just h
            if optSHA1' opt
              -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
              -- we can as well avoid the getDB call in this case, as a small optimization
              then do
-               entry_ <- getDB db dbpath key
+               entry_ <- getDB db dbpath $ fromKey key
                case entry_ of
                  Nothing -> newent insertDB
-                 Just (_, t, s, _, h)
+                 Just (_, t, s, _, h, p)
                    | s /= size                           -> newent updateDB
+                   | not $ keyMatches key p              -> newent updateDB
                    | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
                    | cl == 3                             -> newent' $ Just h
                    | otherwise                           -> newent updateDB
@@ -213,13 +214,14 @@ mkEntry opt db mps path = do
                      when (_sizeOK dir) $
                        -- if the above condition is true, a read error occured somewhere and the info
                        -- can't reliably be stored into the DB
-                       put db dbpath (key, now, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
+                       put db dbpath $ mkDBEntry (key, now, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
                      return . Just $ dir
            let hcompat h = not (BS.null h && optSHA1' opt)
-           entry_ <- getDB db dbpath key
+           entry_ <- getDB db dbpath $ fromKey key
            case entry_ of
              Nothing -> newent insertDB
-             Just (_, t, s, d, h)
+             Just (_, t, s, d, h, p)
+               | not $ keyMatches key p              -> newent updateDB
                | cl == 2 && t >= cmtime && hcompat h -> newent'
                | cl == 3 && hcompat h                -> newent'
                | otherwise                           -> newent updateDB
@@ -237,16 +239,34 @@ mkEntry opt db mps path = do
              cl     = optCLevel opt
 
 
-mkKey :: FileStatus -> FilePath -> Mnt.Point -> IO Int64
+data Key = NoKey | Inode Int64 | PathHash Int64 BS.ByteString
+
+mkKey :: FileStatus -> FilePath -> Mnt.Point -> IO Key
 mkKey status path mp =
   if Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
-  then return $ fromIntegral $ fileID status
+  then return . Inode . fromIntegral . fileID $ status
   else do
     realpath <- canonicalizePath path
-    let hash = BS.unpack . SHA1.hash . fromString $ makeRelative (Mnt.target mp) realpath
-        h64  = fromIntegral <$> hash :: [Int64]
-    return $ sum [w `shiftL` i | (w, i) <- zip h64 [0, 8..]]
+    let hash = SHA1.hash . fromString $ makeRelative (Mnt.target mp) realpath
+        h64  = fromIntegral <$> BS.unpack hash :: [Int64]
+    return $ PathHash (sum [w `shiftL` i | (w, i) <- zip h64 [0, 8..]]) hash
 
+fromKey :: Key -> Int64
+fromKey (Inode k)      = k
+fromKey (PathHash k _) = k
+fromKey NoKey          = error "invalid key"
+
+mkDBEntry :: (Key, Int64, Int, Int, BS.ByteString) -> DBEntry
+mkDBEntry (Inode k, n, s, d, h)      = (k, n, s, d, h, BS.empty)
+mkDBEntry (PathHash k p, n, s, d, h) = (k, n, s, d, h, p)
+mkDBEntry _                          = error "invalid key"
+
+keyMatches :: Key -> BS.ByteString -> Bool
+keyMatches (Inode _) p | BS.null p = True
+                       | otherwise = error "unexpected key"
+keyMatches (PathHash _ p) p' | p == p' = True
+                             | otherwise = False
+keyMatches NoKey _ = error "invalid key"
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, Word32, Bool, Int, Int) -> [Entry] -> Entry
