@@ -9,10 +9,10 @@ import           Data.Bits             (shiftL, shiftR)
 import qualified Data.ByteString       as BS
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy  as BSL
+import           Data.Char             (ord)
 import           Data.Int              (Int64)
 import           Data.List             (find, foldl', sort, sortOn)
 import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust, isNothing)
-import           Data.String           (fromString)
 import           Data.Time.Clock.POSIX
 import           Data.Word             (Word32)
 import           Numeric               (showHex)
@@ -256,7 +256,7 @@ mkKey status path mp =
   then return . Inode . fromIntegral . fileID $ status
   else do
     realpath <- canonicalizePath path
-    let hash = SHA1.hash . fromString $ makeRelative (Mnt.target mp) realpath
+    let hash = SHA1.hash . fromRawString $ makeRelative (Mnt.target mp) realpath
         h64  = fromIntegral <$> BS.unpack hash :: [Int64]
     return $ PathHash (sum [w `shiftL` i | (w, i) <- zip h64 [0, 8..]]) hash
 
@@ -276,6 +276,14 @@ keyMatches (Inode _) p | BS.null p = True
 keyMatches (PathHash _ p) p' | p == p' = True
                              | otherwise = False
 keyMatches NoKey _ = error "invalid key"
+
+-- this is a more robust alternative to fromString, which is not injective:
+-- indeed, e.g. "Mod\232les" and "Mod\56552les" are made into the same ByteString,
+-- which is a bug for the purpose of a crypto hash used as a signature
+fromRawString :: String -> BS.ByteString
+fromRawString s = BS.pack . concat $ charToBytes . ord <$> s
+  where charToBytes c = fromIntegral <$> [c, c `shiftR` 8, c `shiftR` 16] -- ord (maxBound :: Char) < 2^24
+
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, Word32, Bool, Int, Int) -> [Entry] -> Entry
@@ -331,7 +339,7 @@ symlinkCtx = SHA1.update SHA1.init $ BS.pack [0x05, 0xfe, 0x0d, 0x17, 0xac, 0x9a
                                               0x73, 0x99, 0xa6, 0xea, 0x92, 0x38, 0xfa, 0xda, 0x0f, 0x16]
 
 sha1sumSymlink :: FilePath -> IO BS.ByteString
-sha1sumSymlink path = SHA1.finalize . SHA1.update symlinkCtx . fromString <$> readSymbolicLink path
+sha1sumSymlink path = SHA1.finalize . SHA1.update symlinkCtx . fromRawString <$> readSymbolicLink path
 
 sha1sum :: FilePath -> IO BS.ByteString
 sha1sum = fmap SHA1.hashlazy . BSL.readFile
