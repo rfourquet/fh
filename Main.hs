@@ -1,5 +1,3 @@
-{-# LANGUAGE MultiWayIf #-}
-
 module Main where
 
 import           Control.Exception     (IOException, bracket, try)
@@ -180,78 +178,83 @@ mkEntry opt db mps path = do
     Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                          return Nothing
     Right status -> do
-      key <- maybe (return NoKey) (mkKey status path $ optSLink opt) mp -- key won't be used when mp == Nothing
-      if
-       | isRegularFile status -> do
-           let newent' = return . Just . Entry path mode True size du
-               newent put = do
-                 h' <- try $ sha1sum path :: IO (Either IOException BS.ByteString)
-                 case h' of
-                   Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
-                                        newent' Nothing
-                   Right h        -> do _ <- put db dbpath $ mkDBEntry (key, now, size, du, h)
-                                        newent' $ Just h
-           if optSHA1' opt
-             -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
-             -- we can as well avoid the getDB call in this case, as a small optimization
-             then do
-               entry_ <- getDB db dbpath $ fromKey key
-               case entry_ of
-                 Nothing -> newent insertDB
-                 Just (_, t, s, _, h, p)
-                   | s /= size                           -> newent updateDB
-                   | not $ keyMatches key p              -> newent updateDB
-                   | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
-                   | cl == 3                             -> newent' $ Just h
-                   | otherwise                           -> newent updateDB
-             else newent' Nothing
-       | isSymbolicLink status ->
-           if optSLink opt
-           then do
-              ent <- mkEntry opt db mps =<< fmap (takeDirectory path </>) (readSymbolicLink path)
-              return $ flip fmap ent $ \e -> e { _path = path }
-           else
-             -- we compute hash conditionally as directories containing only symlinks will otherwise
-             -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
-             -- seems the make the matter worse (requiring then to make the hash field strict...)
-             Just . Entry path mode True size du <$>
-               if optSHA1' opt then Just <$> sha1sumSymlink path
-                               else return Nothing
-       | isDirectory status -> do
-           let newent put = do
-                 files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
-                 case files' of
-                   Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
-                                        return . Just $ Entry path mode False size du Nothing
-                   Right files -> do
-                     entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
-                     let dir = combine (path, mode, True, size, du) $ catMaybes entries
-                     when (_sizeOK dir) $
-                       -- if the above condition is true, a read error occured somewhere and the info
-                       -- can't reliably be stored into the DB
-                       put db dbpath $ mkDBEntry (key, now, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
-                     return . Just $ dir
-           let hcompat h = not (BS.null h && optSHA1' opt)
-           entry_ <- getDB db dbpath $ fromKey key
-           case entry_ of
-             Nothing -> newent insertDB
-             Just (_, t, s, d, h, p)
-               | not $ keyMatches key p              -> newent updateDB
-               | cl == 2 && t >= cmtime && hcompat h -> newent'
-               | cl == 3 && hcompat h                -> newent'
-               | otherwise                           -> newent updateDB
-               where newent' = return . Just $ Entry path mode True s d (if BS.null h then Nothing else Just h)
-       | otherwise -> return . Just . Entry path mode True size du . Just $ BS.pack $ replicate 20 0
-       where mode   = fromIntegral $ fileMode status
-             cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
-             now    = ceiling $ 10^(9::Int) * now'
-             size   = fromIntegral $ fileSize status
-             du     = fileBlockSize status * 512 -- TODO: check 512 is always valid
-             dev    = fromIntegral $ deviceID status
-             mp     = find ((== dev) . Mnt.devid) mps
-             uuid   = mp >>= Mnt.uuid :: Maybe String
-             dbpath = (\x -> "/var/cache/fh" </> x <.> "db") <$> uuid :: Maybe FilePath
-             cl     = optCLevel opt
+        key <- maybe (return NoKey) (mkKey status path $ optSLink opt) mp -- key won't be used when mp == Nothing
+        mkEntry' opt db mps path status key dbpath now'
+      where dev    = fromIntegral $ deviceID status
+            mp     = find ((== dev) . Mnt.devid) mps
+            uuid   = mp >>= Mnt.uuid :: Maybe String
+            dbpath = (\x -> "/var/cache/fh" </> x <.> "db") <$> uuid :: Maybe FilePath
+
+mkEntry' :: Options -> DB -> [Mnt.Point] -> FilePath
+         -> FileStatus -> Key -> Maybe FilePath -> POSIXTime
+         -> IO (Maybe Entry)
+mkEntry' opt db mps path status key dbpath now'
+  | isRegularFile status = do
+      let newent' = return . Just . Entry path mode True size du
+          newent put = do
+            h' <- try $ sha1sum path :: IO (Either IOException BS.ByteString)
+            case h' of
+              Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
+                                   newent' Nothing
+              Right h        -> do _ <- put db dbpath $ mkDBEntry (key, now, size, du, h)
+                                   newent' $ Just h
+      if optSHA1' opt
+        -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
+        -- we can as well avoid the getDB call in this case, as a small optimization
+        then do
+          entry_ <- getDB db dbpath $ fromKey key
+          case entry_ of
+            Nothing -> newent insertDB
+            Just (_, t, s, _, h, p)
+              | s /= size                           -> newent updateDB
+              | not $ keyMatches key p              -> newent updateDB
+              | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
+              | cl == 3                             -> newent' $ Just h
+              | otherwise                           -> newent updateDB
+        else newent' Nothing
+  | isSymbolicLink status =
+      if optSLink opt
+      then do
+         ent <- mkEntry opt db mps =<< fmap (takeDirectory path </>) (readSymbolicLink path)
+         return $ flip fmap ent $ \e -> e { _path = path }
+      else
+        -- we compute hash conditionally as directories containing only symlinks will otherwise
+        -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
+        -- seems the make the matter worse (requiring then to make the hash field strict...)
+        Just . Entry path mode True size du <$>
+          if optSHA1' opt then Just <$> sha1sumSymlink path
+                          else return Nothing
+  | isDirectory status = do
+      let newent put = do
+            files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
+            case files' of
+              Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
+                                   return . Just $ Entry path mode False size du Nothing
+              Right files -> do
+                entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
+                let dir = combine (path, mode, True, size, du) $ catMaybes entries
+                when (_sizeOK dir) $
+                  -- if the above condition is true, a read error occured somewhere and the info
+                  -- can't reliably be stored into the DB
+                  put db dbpath $ mkDBEntry (key, now, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
+                return . Just $ dir
+      let hcompat h = not (BS.null h && optSHA1' opt)
+      entry_ <- getDB db dbpath $ fromKey key
+      case entry_ of
+        Nothing -> newent insertDB
+        Just (_, t, s, d, h, p)
+          | not $ keyMatches key p              -> newent updateDB
+          | cl == 2 && t >= cmtime && hcompat h -> newent'
+          | cl == 3 && hcompat h                -> newent'
+          | otherwise                           -> newent updateDB
+          where newent' = return . Just $ Entry path mode True s d (if BS.null h then Nothing else Just h)
+  | otherwise = return . Just . Entry path mode True size du . Just $ BS.pack $ replicate 20 0
+  where mode   = fromIntegral $ fileMode status
+        cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
+        now    = ceiling $ 10^(9::Int) * now'
+        size   = fromIntegral $ fileSize status
+        du     = fileBlockSize status * 512 -- TODO: check 512 is always valid
+        cl     = optCLevel opt
 
 
 data Key = NoKey | Inode Int64 | PathHash Int64 BS.ByteString
