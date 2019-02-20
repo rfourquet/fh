@@ -9,8 +9,11 @@ import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy  as BSL
 import           Data.Char             (ord)
 import           Data.Int              (Int64)
+import           Data.IORef
 import           Data.List             (find, foldl', sort, sortOn)
 import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust)
+import           Data.Set              (Set)
+import qualified Data.Set              as Set
 import           Data.Time.Clock.POSIX
 import           Data.Word             (Word32)
 import           Numeric               (showHex)
@@ -43,6 +46,7 @@ data Options = Options { _optSHA1   :: Bool
                        , _optCLevel :: CacheLevel
                        , optMtime   :: Bool
                        , optSLink   :: Bool
+                       , optUnique  :: Bool
                        , optSI      :: Bool
                        , optSort    :: Bool
 
@@ -65,9 +69,9 @@ optPaths :: Options -> [FilePath]
 optPaths opt = if null (_optPaths opt) then ["."] else _optPaths opt
 
 optCLevel :: Options -> CacheLevel
-optCLevel opt | _optCLevel opt == -1 && optSHA1' opt       = 1
-              | _optCLevel opt == -1 && not (optSHA1' opt) = 2
-              | otherwise                                  = _optCLevel opt
+optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
+              | _optCLevel opt == -1                                    = 2
+              | otherwise                                               = _optCLevel opt
 
 parserOptions :: Parser Options
 parserOptions = Options
@@ -88,6 +92,8 @@ parserOptions = Options
                             help "use mtime instead of ctime to interpret cache level")
                 <*> switch (long "dereference" <> short 'L' <>
                             help "dereference all symbolic links")
+                <*> switch (long "unique" <> short 'u' <>
+                            help "discard files which have already been accounted for")
                 <*> switch (long "si" <> short 't' <>
                             help "use powers of 1000 instead of 1024 for sizes")
                 <*> switch (long "sort" <> short 'S' <>
@@ -108,8 +114,9 @@ options = info (helper <*> parserOptions)
                     \ When the size of a file has changed since cached, the hash is unconditionally            \
                     \ re-computed (even when l = 3).                                                           \
                     \ The default value of l is 1 when hashes are requested (should be reliable in most cases) \
-                    \ and 2 when only the size is requested (this avoids to recursively traverse directories,  \
-                    \ which would then be no better than du)."
+                    \ or when the unique option is active (it's otherwise easy to get confusing results with   \
+                    \ l = 2), and 2 when only the size is requested (this avoids to recursively traverse       \
+                    \ directories, which would then be no better than du)."
 
 type CacheLevel = Int
 
@@ -128,6 +135,7 @@ main = do
   mapM_ mkTranslitEncoding [stdout, stderr, stdin]
 
   opt <- execParser options
+  seen <- newIORef Set.empty
   bracket newDB closeDB $ \db -> do
 
     let printEntry ent = do
@@ -138,7 +146,7 @@ main = do
 
     mps <- filter (isJust . Mnt.uuid) <$> Mnt.points
 
-    list_ <- forM (mkEntry opt db mps <$> optPaths opt) $ \entIO_ -> do
+    list_ <- forM (mkEntry opt db seen mps <$> optPaths opt) $ \entIO_ -> do
       ent_ <- entIO_
       case ent_ of
         Nothing -> return Nothing
@@ -170,25 +178,32 @@ data Entry = Entry { _path   :: FilePath
                    } deriving (Show)
 
 
-mkEntry :: Options -> DB -> [Mnt.Point] -> FilePath -> IO (Maybe Entry)
-mkEntry opt db mps path = do
+mkEntry :: Options -> DB -> IORef (Set (Int64, Int64)) -> [Mnt.Point] -> FilePath -> IO (Maybe Entry)
+mkEntry opt db seen mps path = do
   status' <- try (getSymbolicLinkStatus path) :: IO (Either IOException FileStatus)
   now' <- getPOSIXTime
   case status' of
     Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                          return Nothing
     Right status -> do
-        key <- maybe (return NoKey) (mkKey status path $ optSLink opt) mp -- key won't be used when mp == Nothing
-        mkEntry' opt db mps path status key dbpath now'
+        key <- maybe (return NoKey) (mkKey status path (optSLink opt) (optUnique opt)) mp -- key won't be used when mp == Nothing
+        seen' <- if optUnique opt
+                   then readIORef seen
+                   else return Set.empty
+        let devino = (dev, fromIntegral . fileID $ status)
+        if optUnique opt && Set.member devino seen'
+          then return Nothing
+          else do writeIORef seen $ Set.insert devino seen'
+                  mkEntry' opt db seen mps path status key dbpath now'
       where dev    = fromIntegral $ deviceID status
             mp     = find ((== dev) . Mnt.devid) mps
             uuid   = mp >>= Mnt.uuid :: Maybe String
             dbpath = (\x -> "/var/cache/fh" </> x <.> "db") <$> uuid :: Maybe FilePath
 
-mkEntry' :: Options -> DB -> [Mnt.Point] -> FilePath
+mkEntry' :: Options -> DB -> IORef (Set (Int64, Int64)) -> [Mnt.Point] -> FilePath
          -> FileStatus -> Key -> Maybe FilePath -> POSIXTime
          -> IO (Maybe Entry)
-mkEntry' opt db mps path status key dbpath now'
+mkEntry' opt db seen mps path status key dbpath now'
   | isRegularFile status = do
       let newent' = return . Just . Entry path mode True size du
           newent put = do
@@ -215,7 +230,7 @@ mkEntry' opt db mps path status key dbpath now'
   | isSymbolicLink status =
       if optSLink opt
       then do
-         ent <- mkEntry opt db mps =<< fmap (takeDirectory path </>) (readSymbolicLink path)
+         ent <- mkEntry opt db seen mps =<< fmap (takeDirectory path </>) (readSymbolicLink path)
          return $ flip fmap ent $ \e -> e { _path = path }
       else
         -- we compute hash conditionally as directories containing only symlinks will otherwise
@@ -231,7 +246,7 @@ mkEntry' opt db mps path status key dbpath now'
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    return . Just $ Entry path mode False size du Nothing
               Right files -> do
-                entries <- sequence $ mkEntry opt db mps . (path </>) <$> sort files :: IO [Maybe Entry]
+                entries <- sequence $ mkEntry opt db seen mps . (path </>) <$> sort files :: IO [Maybe Entry]
                 let dir = combine (path, mode, True, size, du) $ catMaybes entries
                 when (_sizeOK dir) $
                   -- if the above condition is true, a read error occured somewhere and the info
@@ -261,26 +276,30 @@ data Key = NoKey | Inode Int64 | PathHash Int64 BS.ByteString
 
 highBit :: Int64
 highBit = 1 `shiftL` 63
+highBit' :: Int64
+highBit' = 1 `shiftL` 62
 
-mask63 :: Int64 -> Int64
-mask63 = (.&. (highBit - 1))
+mask62 :: Int64 -> Int64
+mask62 = (.&. (highBit' - 1))
 
 -- the high bit of the Int64 part of the Key encodes whether
 -- symbolic links are followed
-mkKey :: FileStatus -> FilePath -> Bool -> Mnt.Point -> IO Key
-mkKey status path follow mp =
+mkKey :: FileStatus -> FilePath -> Bool -> Bool -> Mnt.Point -> IO Key
+mkKey status path follow unique mp =
   if Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
   then let ino = fromIntegral . fileID $ status :: Int64
-       in if ino < 0
-          then error "unexpected negative inode number"
-          else return $ Inode $ bit .|. ino
+       in if mask62 ino == ino
+          then return $ Inode $ bits .|. ino
+          else error "unexpected negative inode number"
   else do
     realpath <- canonicalizePath path
     let hash = SHA1.hash . fromRawString $ makeRelative (Mnt.target mp) realpath
         ws   = fromIntegral <$> BS.unpack hash :: [Int64]
-        h64  = mask63 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
-    return $ PathHash (bit .|. h64) hash
-  where bit = if follow && isDirectory status then highBit else 0
+        h64  = mask62 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
+    return $ PathHash (bits .|. h64) hash
+  where bit1 = if follow && isDirectory status then highBit else 0
+        bit2 = if unique && isDirectory status then highBit' else 0
+        bits = bit1 .|. bit2
 
 fromKey :: Key -> Int64
 fromKey (Inode k)      = k
