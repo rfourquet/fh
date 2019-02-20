@@ -5,7 +5,7 @@ module Main where
 import           Control.Exception     (IOException, bracket, try)
 import           Control.Monad         (forM, forM_, unless, when)
 import qualified Crypto.Hash.SHA1      as SHA1
-import           Data.Bits             (shiftL, shiftR)
+import           Data.Bits             (shiftL, shiftR, (.&.), (.|.))
 import qualified Data.ByteString       as BS
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy  as BSL
@@ -20,7 +20,7 @@ import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, aut
                                         footer, fullDesc, help, helper, info, long, many, metavar,
                                         option, progDesc, readerError, short, str, switch, value)
 import           System.Directory      (canonicalizePath, listDirectory)
-import           System.FilePath       (makeRelative, takeFileName, (<.>), (</>))
+import           System.FilePath       (makeRelative, takeDirectory, takeFileName, (<.>), (</>))
 import           System.IO             (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
                                         mkTextEncoding, stderr, stdin, stdout)
 import           System.Posix.Files    (FileStatus, deviceID, fileID, fileMode, fileSize,
@@ -44,6 +44,7 @@ data Options = Options { _optSHA1   :: Bool
 
                        , _optCLevel :: CacheLevel
                        , optMtime   :: Bool
+                       , optSLink   :: Bool
                        , optSI      :: Bool
                        , optSort    :: Bool
 
@@ -87,6 +88,8 @@ parserOptions = Options
                                    help "policy for cache use, in 0..3 (default: 1 or 2)")
                 <*> switch (long "mtime" <> short 'm' <>
                             help "use mtime instead of ctime to interpret cache level")
+                <*> switch (long "dereference" <> short 'L' <>
+                            help "dereference all symbolic links")
                 <*> switch (long "si" <> short 't' <>
                             help "use powers of 1000 instead of 1024 for sizes")
                 <*> switch (long "sort" <> short 'S' <>
@@ -179,7 +182,7 @@ mkEntry opt db mps path = do
     Right status -> do
       when (isNothing mp) $
         hPutStrLn stderr ("warning: mount point not found for device: " ++ show dev)
-      key <- maybe (return NoKey) (mkKey status path) mp -- key won't be used when mp == Nothing
+      key <- maybe (return NoKey) (mkKey status path $ optSLink opt) mp -- key won't be used when mp == Nothing
       if
        | isRegularFile status -> do
            let newent' = return . Just . Entry path mode True size du
@@ -205,12 +208,17 @@ mkEntry opt db mps path = do
                    | otherwise                           -> newent updateDB
              else newent' Nothing
        | isSymbolicLink status ->
-           -- we compute hash conditionally as directories containing only symlinks will otherwise
-           -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
-           -- seems the make the matter worse (requiring then to make the hash field strict...)
-           Just . Entry path mode True size du <$>
-             if optSHA1' opt then Just <$> sha1sumSymlink path
-                             else return Nothing
+           if optSLink opt
+           then do
+              ent <- mkEntry opt db mps =<< fmap (takeDirectory path </>) (readSymbolicLink path)
+              return $ flip fmap ent $ \e -> e { _path = path }
+           else
+             -- we compute hash conditionally as directories containing only symlinks will otherwise
+             -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
+             -- seems the make the matter worse (requiring then to make the hash field strict...)
+             Just . Entry path mode True size du <$>
+               if optSHA1' opt then Just <$> sha1sumSymlink path
+                               else return Nothing
        | isDirectory status -> do
            let newent put = do
                  files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
@@ -250,15 +258,28 @@ mkEntry opt db mps path = do
 
 data Key = NoKey | Inode Int64 | PathHash Int64 BS.ByteString
 
-mkKey :: FileStatus -> FilePath -> Mnt.Point -> IO Key
-mkKey status path mp =
+highBit :: Int64
+highBit = 1 `shiftL` 63
+
+mask63 :: Int64 -> Int64
+mask63 = (.&. (highBit - 1))
+
+-- the high bit of the Int64 part of the Key encodes whether
+-- symbolic links are followed
+mkKey :: FileStatus -> FilePath -> Bool -> Mnt.Point -> IO Key
+mkKey status path follow mp =
   if Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
-  then return . Inode . fromIntegral . fileID $ status
+  then let ino = fromIntegral . fileID $ status :: Int64
+       in if ino < 0
+          then error "unexpected negative inode number"
+          else return $ Inode $ bit .|. ino
   else do
     realpath <- canonicalizePath path
     let hash = SHA1.hash . fromRawString $ makeRelative (Mnt.target mp) realpath
-        h64  = fromIntegral <$> BS.unpack hash :: [Int64]
-    return $ PathHash (sum [w `shiftL` i | (w, i) <- zip h64 [0, 8..]]) hash
+        ws   = fromIntegral <$> BS.unpack hash :: [Int64]
+        h64  = mask63 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
+    return $ PathHash (bit .|. h64) hash
+  where bit = if follow && isDirectory status then highBit else 0
 
 fromKey :: Key -> Int64
 fromKey (Inode k)      = k
