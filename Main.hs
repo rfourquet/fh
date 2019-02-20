@@ -12,7 +12,7 @@ import qualified Data.ByteString.Lazy  as BSL
 import           Data.Char             (ord)
 import           Data.Int              (Int64)
 import           Data.List             (find, foldl', sort, sortOn)
-import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust, isNothing)
+import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust)
 import           Data.Time.Clock.POSIX
 import           Data.Word             (Word32)
 import           Numeric               (showHex)
@@ -180,8 +180,6 @@ mkEntry opt db mps path = do
     Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                          return Nothing
     Right status -> do
-      when (isNothing mp) $
-        hPutStrLn stderr ("warning: mount point not found for device: " ++ show dev)
       key <- maybe (return NoKey) (mkKey status path $ optSLink opt) mp -- key won't be used when mp == Nothing
       if
        | isRegularFile status -> do
