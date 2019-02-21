@@ -52,6 +52,8 @@ data Options = Options { _optSHA1   :: Bool
                        , optSLink   :: Bool
                        , optUnique  :: Bool
                        , optSI      :: Bool
+                       , optMinSize :: Int
+                       , optMinCnt  :: Int
                        , _optSort   :: Bool
                        , optSortCnt :: Bool
                        , optNoGit   :: Bool
@@ -112,6 +114,10 @@ parserOptions = Options
                             help "discard files which have already been accounted for")
                 <*> switch (long "si" <> short 't' <>
                             help "use powers of 1000 instead of 1024 for sizes")
+                <*> option auto (long "minsize" <> short 'z' <> value 0 <> metavar "INT" <>
+                                 help "smallest size to show, in MiB")
+                <*> option auto (long "mincount" <> short 'k' <> value 0 <> metavar "INT" <>
+                                 help "smallest count to show")
                 -- TODO make the 2 sorting options mutually exclusive
                 <*> switch (long "sort" <> short 'S' <>
                             help "sort output, according to size")
@@ -171,9 +177,12 @@ main = do
       ent_ <- entIO_
       case ent_ of
         Nothing -> return Nothing
-        Just ent -> do
-          unless (optSort opt || optSortCnt opt) (printEntry ent)
-          return ent_
+        Just ent ->
+          if optMinSize opt * 1024 * 1024 <= _size ent &&
+             optMinCnt opt <= _cnt ent
+            then do unless (optSort opt || optSortCnt opt) (printEntry ent)
+                    return ent_
+            else return Nothing
 
     let list = catMaybes list_
     when (optSort opt)    $ forM_ (sortOn _size list) printEntry
