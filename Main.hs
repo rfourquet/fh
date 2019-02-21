@@ -11,7 +11,7 @@ import qualified Data.ByteString.Lazy  as BL
 import           Data.Char             (ord)
 import           Data.Int              (Int64)
 import           Data.IORef
-import           Data.List             (find, foldl', sort, sortOn)
+import           Data.List             (find, foldl', isInfixOf, sort, sortOn)
 import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust)
 import           Data.Set              (Set)
 import qualified Data.Set              as Set
@@ -50,6 +50,7 @@ data Options = Options { _optSHA1   :: Bool
                        , _optCLevel :: CacheLevel
                        , optMtime   :: Bool
                        , optSLink   :: Bool
+                       , optALink   :: Bool
                        , optUnique  :: Bool
                        , optSI      :: Bool
                        , optMinSize :: Int
@@ -110,6 +111,8 @@ parserOptions = Options
                             help "use mtime instead of ctime to interpret cache level")
                 <*> switch (long "dereference" <> short 'L' <>
                             help "dereference all symbolic links")
+                <*> switch (long "deref-annex" <> short 'A' <>
+                            help "dereference all git-annex symbolic links")
                 <*> switch (long "unique" <> short 'u' <>
                             help "discard files which have already been accounted for")
                 <*> switch (long "si" <> short 't' <>
@@ -218,7 +221,9 @@ mkEntry opt db seen mps path = do
     Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                          return Nothing
     Right status -> do
-        key <- maybe (return NoKey) (mkKey status path (optSLink opt) (optUnique opt)) mp -- key won't be used when mp == Nothing
+        key <- maybe (return NoKey) -- key won't be used when mp == Nothing
+                     (mkKey status path (optSLink opt) (optALink opt) (optUnique opt))
+                     mp
         seen' <- if optUnique opt
                    then readIORef seen
                    else return Set.empty
@@ -259,18 +264,19 @@ mkEntry' opt db seen mps path status key dbpath now'
               | cl == 3                             -> newent' $ Just h
               | otherwise                           -> newent updateDB
         else newent' Nothing
-  | isSymbolicLink status =
-      if optSLink opt
+  | isSymbolicLink status = do
+      target <- readSymbolicLink path
+      if optSLink opt || optALink opt && ".git/annex/objects/" `isInfixOf` target
       then do
-         ent <- mkEntry opt db seen mps =<< fmap (takeDirectory path </>) (readSymbolicLink path)
+         ent <- mkEntry opt db seen mps (takeDirectory path </> target)
          return $ flip fmap ent $ \e -> e { _path = path }
       else
         -- we compute hash conditionally as directories containing only symlinks will otherwise
         -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
         -- seems to make the matter worse (requiring then to make the hash field strict...)
-        Just . Entry path mode True size du 0 <$>
-          if optSHA1' opt then Just <$> sha1sumSymlink path
-                          else return Nothing
+        return . Just . Entry path mode True size du 0 $
+          if optSHA1' opt then Just $ sha1sumSymlink target
+                          else Nothing
   | isDirectory status = do
       let newent put = do
             files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
@@ -325,32 +331,33 @@ isDir e = directoryMode == intersectFileModes directoryMode (fromIntegral $ _mod
 
 data Key = NoKey | Inode Int64 | PathHash Int64 ByteString
 
-highBit :: Int64
-highBit = 1 `shiftL` 63
-highBit' :: Int64
-highBit' = 1 `shiftL` 62
+highBit, highBit', highBit'' :: Int64
+highBit   = 1 `shiftL` 63
+highBit'  = 1 `shiftL` 62
+highBit'' = 1 `shiftL` 61
 
-mask62 :: Int64 -> Int64
-mask62 = (.&. (highBit' - 1))
+mask61 :: Int64 -> Int64
+mask61 = (.&. (highBit'' - 1))
 
 -- the high bit of the Int64 part of the Key encodes whether
 -- symbolic links are followed
-mkKey :: FileStatus -> FilePath -> Bool -> Bool -> Mnt.Point -> IO Key
-mkKey status path follow unique mp =
+mkKey :: FileStatus -> FilePath -> Bool -> Bool -> Bool -> Mnt.Point -> IO Key
+mkKey status path follow followA unique mp =
   if Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
   then let ino = fromIntegral . fileID $ status :: Int64
-       in if mask62 ino == ino
+       in if mask61 ino == ino
           then return $ Inode $ bits .|. ino
           else error "unexpected negative inode number"
   else do
     realpath <- canonicalizePath path
     let hash = SHA1.hash . fromRawString $ makeRelative (Mnt.target mp) realpath
         ws   = fromIntegral <$> B.unpack hash :: [Int64]
-        h64  = mask62 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
+        h64  = mask61 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
     return $ PathHash (bits .|. h64) hash
-  where bit1 = if follow && isDirectory status then highBit else 0
-        bit2 = if unique && isDirectory status then highBit' else 0
-        bits = bit1 .|. bit2
+  where bit   = if follow  && isDirectory status then highBit   else 0
+        bit'  = if followA && isDirectory status then highBit'  else 0
+        bit'' = if unique  && isDirectory status then highBit'' else 0
+        bits = bit .|. bit' .|. bit''
 
 fromKey :: Key -> Int64
 fromKey (Inode k)      = k
@@ -416,8 +423,8 @@ symlinkCtx :: SHA1.Ctx
 symlinkCtx = SHA1.update SHA1.init $ B.pack [0x05, 0xfe, 0x0d, 0x17, 0xac, 0x9a, 0x10, 0xbc, 0x7d, 0xb1,
                                              0x73, 0x99, 0xa6, 0xea, 0x92, 0x38, 0xfa, 0xda, 0x0f, 0x16]
 
-sha1sumSymlink :: FilePath -> IO ByteString
-sha1sumSymlink path = SHA1.finalize . SHA1.update symlinkCtx . fromRawString <$> readSymbolicLink path
+sha1sumSymlink :: String -> ByteString
+sha1sumSymlink = SHA1.finalize . SHA1.update symlinkCtx . fromRawString
 
 sha1sum :: FilePath -> IO ByteString
 sha1sum = fmap SHA1.hashlazy . BL.readFile
