@@ -14,7 +14,7 @@ import           Database.SQLite3 (ColumnType (..), Database, SQLData (..), Stat
 -- * public API
 
 type DB = IORef (Maybe DB', Maybe IDMap)
-type DBEntry = (Int64, Int64, Int, Int, BS.ByteString, BS.ByteString)
+type DBEntry = (Int64, Int64, Int, Int, Int, BS.ByteString, BS.ByteString)
 
 newDB :: IO DB
 newDB = newIORef (Nothing, Nothing)
@@ -72,13 +72,14 @@ open' path = do
            \   utime INTEGER,                   \
            \   size  INTEGER,                   \
            \   du    INTEGER,                   \
+           \   cnt   INTEGER,                   \
            \   sha1  BLOB,                      \
            \   hpath BLOB                     ) "
   -- utime: update time
   exec db "BEGIN TRANSACTION"
   DB' path db
-    <$> prepare db "INSERT INTO files values (?, ?, ?, ?, ?, ?)"
-    <*> prepare db "UPDATE files SET utime=?, size=?, du=?, sha1=?, hpath=? WHERE key=?"
+    <$> prepare db "INSERT INTO files values (?, ?, ?, ?, ?, ?, ?)"
+    <*> prepare db "UPDATE files SET utime=?, size=?, du=?, cnt=?, sha1=?, hpath=? WHERE key=?"
     <*> prepare db "SELECT * FROM files WHERE key=?"
 
 close' :: DB' -> IO ()
@@ -91,16 +92,16 @@ int :: Integral a => a -> SQLData
 int = SQLInteger . fromIntegral
 
 insert' :: DBEntry -> DB' -> IO ()
-insert' (key, utime, size, du, sha1, hpath) db = do
+insert' (key, utime, size, du, cnt, sha1, hpath) db = do
   let ins = _ins db
-  bind ins [int key, int utime, int size, int du, SQLBlob sha1, SQLBlob hpath]
+  bind ins [int key, int utime, int size, int du, int cnt, SQLBlob sha1, SQLBlob hpath]
   _ <- step ins
   reset ins
 
 update' :: DBEntry -> DB' -> IO ()
-update' (key, utime, size, du, sha1, hpath) db = do
+update' (key, utime, size, du, cnt, sha1, hpath) db = do
   let upd = _upd db
-  bind upd [int utime, int size, int du, SQLBlob sha1, SQLBlob hpath, int key]
+  bind upd [int utime, int size, int du, int cnt, SQLBlob sha1, SQLBlob hpath, int key]
   _ <- step upd
   reset upd
 
@@ -113,9 +114,9 @@ get' key db = do
   case res of
     Done -> return Nothing
     Row -> do
-      [_, SQLInteger utime, SQLInteger size, SQLInteger du, SQLBlob sha1, SQLBlob hpath] <-
-        typedColumns get $ replicate 4 (Just IntegerColumn) ++ [Just BlobColumn, Just BlobColumn]
-      return $ Just (key, utime, fromIntegral size, fromIntegral du, sha1, hpath)
+      [_, SQLInteger utime, SQLInteger size, SQLInteger du, SQLInteger cnt, SQLBlob sha1, SQLBlob hpath] <-
+        typedColumns get $ replicate 5 (Just IntegerColumn) ++ [Just BlobColumn, Just BlobColumn]
+      return $ Just (key, utime, fromIntegral size, fromIntegral du, fromIntegral cnt, sha1, hpath)
 
 
 -- ** Hash ID

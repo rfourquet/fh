@@ -25,9 +25,10 @@ import           System.Directory      (canonicalizePath, listDirectory)
 import           System.FilePath       (makeRelative, takeDirectory, takeFileName, (<.>), (</>))
 import           System.IO             (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
                                         mkTextEncoding, stderr, stdin, stdout)
-import           System.Posix.Files    (FileStatus, deviceID, fileID, fileMode, fileSize,
-                                        getSymbolicLinkStatus, isDirectory, isRegularFile,
-                                        isSymbolicLink, modificationTimeHiRes, readSymbolicLink,
+import           System.Posix.Files    (FileStatus, deviceID, directoryMode, fileID, fileMode,
+                                        fileSize, getSymbolicLinkStatus, intersectFileModes,
+                                        isDirectory, isRegularFile, isSymbolicLink,
+                                        modificationTimeHiRes, readSymbolicLink,
                                         statusChangeTimeHiRes)
 import           Text.Printf           (printf)
 
@@ -42,6 +43,7 @@ data Options = Options { _optSHA1   :: Bool
                        , _optHID    :: Int
                        , _optSize   :: Bool
                        , optDU      :: Bool
+                       , optCnt     :: Bool
                        , optTotal   :: Bool
 
                        , _optCLevel :: CacheLevel
@@ -55,7 +57,7 @@ data Options = Options { _optSHA1   :: Bool
                        }
 
 optOutUnspecified :: Options -> Bool
-optOutUnspecified opt = not (_optSHA1 opt || optHID opt || _optSize opt || optDU opt)
+optOutUnspecified opt = not . or $ [_optSHA1, optHID, _optSize, optDU, optCnt] <*> pure opt
 
 optSHA1 :: Options -> Bool
 optSHA1 opt = optOutUnspecified opt || _optSHA1 opt
@@ -88,6 +90,8 @@ parserOptions = Options
                             help "print (apparent) size (DEFAULT)")
                 <*> switch (long "disk-usage" <> short 'd' <>
                             help "print actual size (disk usage) (EXPERIMENTAL)")
+                <*> switch (long "count" <> short 'n' <>
+                            help "print number of (recursively) contained files")
                 <*> switch (long "total" <> short 'c' <>
                             help "produce a grand total")
 
@@ -163,7 +167,7 @@ main = do
     let list = catMaybes list_
     when (optSort opt) $ forM_ (sortOn _size list) printEntry
     when (optTotal opt) $
-      printEntry $ combine ("*total*", 0, True, 0, 0)
+      printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0, 0)
                            (sortOn (takeFileName . _path) list)
 
 
@@ -180,6 +184,7 @@ data Entry = Entry { _path   :: FilePath
                    , _sizeOK :: Bool -- size and du are reliable
                    , _size   :: Int
                    , _du     :: Int
+                   , _cnt    :: Int
                    , _hash   :: Maybe BS.ByteString
                    } deriving (Show)
 
@@ -211,13 +216,13 @@ mkEntry' :: Options -> DB -> IORef (Set (Int64, Int64)) -> [Mnt.Point] -> FilePa
          -> IO (Maybe Entry)
 mkEntry' opt db seen mps path status key dbpath now'
   | isRegularFile status = do
-      let newent' = return . Just . Entry path mode True size du
+      let newent' = return . Just . Entry path mode True size du 1
           newent put = do
             h' <- try $ sha1sum path :: IO (Either IOException BS.ByteString)
             case h' of
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    newent' Nothing
-              Right h        -> do _ <- put db dbpath $ mkDBEntry (key, now, size, du, h)
+              Right h        -> do _ <- put db dbpath $ mkDBEntry (key, now, size, du, 1, h)
                                    newent' $ Just h
       if optSHA1' opt
         -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
@@ -226,7 +231,7 @@ mkEntry' opt db seen mps path status key dbpath now'
           entry_ <- getDB db dbpath $ fromKey key
           case entry_ of
             Nothing -> newent insertDB
-            Just (_, t, s, _, h, p)
+            Just (_, t, s, _, _, h, p)
               | s /= size                           -> newent updateDB
               | not $ keyMatches key p              -> newent updateDB
               | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
@@ -242,7 +247,7 @@ mkEntry' opt db seen mps path status key dbpath now'
         -- we compute hash conditionally as directories containing only symlinks will otherwise
         -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
         -- seems the make the matter worse (requiring then to make the hash field strict...)
-        Just . Entry path mode True size du <$>
+        Just . Entry path mode True size du 1 <$>
           if optSHA1' opt then Just <$> sha1sumSymlink path
                           else return Nothing
   | isDirectory status = do
@@ -250,26 +255,26 @@ mkEntry' opt db seen mps path status key dbpath now'
             files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
             case files' of
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
-                                   return . Just $ Entry path mode False size du Nothing
+                                   return . Just $ Entry path mode False size du 0 Nothing
               Right files -> do
                 entries <- sequence $ mkEntry opt db seen mps . (path </>) <$> sort files :: IO [Maybe Entry]
                 let dir = combine (path, mode, True, size, du) $ catMaybes entries
                 when (_sizeOK dir) $
                   -- if the above condition is true, a read error occured somewhere and the info
                   -- can't reliably be stored into the DB
-                  put db dbpath $ mkDBEntry (key, now, _size dir, _du dir, fromMaybe BS.empty (_hash dir))
+                  put db dbpath $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe BS.empty (_hash dir))
                 return . Just $ dir
       let hcompat h = not (BS.null h && optSHA1' opt)
       entry_ <- getDB db dbpath $ fromKey key
       case entry_ of
         Nothing -> newent insertDB
-        Just (_, t, s, d, h, p)
+        Just (_, t, s, d, n, h, p)
           | not $ keyMatches key p              -> newent updateDB
           | cl == 2 && t >= cmtime && hcompat h -> newent'
           | cl == 3 && hcompat h                -> newent'
           | otherwise                           -> newent updateDB
-          where newent' = return . Just $ Entry path mode True s d (if BS.null h then Nothing else Just h)
-  | otherwise = return . Just . Entry path mode True size du . Just $ BS.pack $ replicate 20 0
+          where newent' = return . Just $ Entry path mode True s d n (if BS.null h then Nothing else Just h)
+  | otherwise = return . Just . Entry path mode True size du 0 . Just $ BS.pack $ replicate 20 0
   where mode   = fromIntegral $ fileMode status
         cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
         now    = ceiling $ 10^(9::Int) * now'
@@ -312,10 +317,10 @@ fromKey (Inode k)      = k
 fromKey (PathHash k _) = k
 fromKey NoKey          = error "invalid key"
 
-mkDBEntry :: (Key, Int64, Int, Int, BS.ByteString) -> DBEntry
-mkDBEntry (Inode k, n, s, d, h)      = (k, n, s, d, h, BS.empty)
-mkDBEntry (PathHash k p, n, s, d, h) = (k, n, s, d, h, p)
-mkDBEntry _                          = error "invalid key"
+mkDBEntry :: (Key, Int64, Int, Int, Int, BS.ByteString) -> DBEntry
+mkDBEntry (Inode k, t, s, d, n, h)      = (k, t, s, d, n, h, BS.empty)
+mkDBEntry (PathHash k p, t, s, d, n, h) = (k, t, s, d, n, h, p)
+mkDBEntry _                             = error "invalid key"
 
 keyMatches :: Key -> BS.ByteString -> Bool
 keyMatches (Inode _) p | BS.null p = True
@@ -334,27 +339,32 @@ fromRawString s = BS.pack . concat $ charToBytes . ord <$> s
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, Word32, Bool, Int, Int) -> [Entry] -> Entry
-combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d0, pure dirCtx) entries
-  where update (ok, s, d, ctx) (Entry n m ok' size du hash) =
-          (ok && ok', s+size, d+du, SHA1.update <$> ctx <*>
-              fmap BS.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack $ takeFileName n, Just $ BS.singleton 0]))
+combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d0, 0, pure dirCtx) entries
+  where update (ok, s, d, n, ctx) (Entry p m ok' size du cnt hash) =
+          (ok && ok', s+size, d+du, n+cnt, SHA1.update <$> ctx <*>
+              fmap BS.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack $ takeFileName p, Just $ BS.singleton 0]))
               -- The mode of a file has no effect on its hash, only on its containing dir's hash;
               -- this is similar to how git does.
               -- We add '\0' (`singleton 0`) to be sure that 2 unequal dirs won't have the same hash;
               -- this assumes '\0' can't be in a file name.
-        finalize (ok, s, d, ctx) = Entry name mode ok s d $ SHA1.finalize <$> ctx
+        finalize (ok, s, d, n, ctx) = Entry name mode ok s d n $ SHA1.finalize <$> ctx
         pack32 m = BS.pack $ fromIntegral <$> [m, m `shiftR` 8, m `shiftR` 16, m `shiftR` 24]
 
 
 -- * display
 
 showEntry :: Options -> Maybe Int64 -> Entry -> String
-showEntry opt hid (Entry path _ _ size du hash) =
-  let sp   = if optSize opt then formatSize opt size ++ "  " ++ path  else path
-      dsp  = if optDU opt then formatSize opt du ++ "  " ++ sp        else sp
-      hdsp = if optSHA1 opt -- if hash is still Nothing, there was an I/O error
-             then maybe (replicate 40 '*') hexlify hash ++ "  " ++ dsp else dsp
-      in formatHashID opt hid ++ hdsp
+showEntry opt hid (Entry path mode _ size du cnt hash) =
+  let isdir = directoryMode == intersectFileModes directoryMode (fromIntegral mode)
+      np    = if optCnt opt then
+                if isdir then printf "%14s" ("("++ show cnt ++ ")  ") ++ path
+                         else "              " ++ path
+                else path
+      snp   = if optSize opt then formatSize opt size ++ "  " ++ np               else np
+      dsnp  = if optDU opt then formatSize opt du ++ "  " ++ snp                  else snp
+      hdsnp = if optSHA1 opt -- if hash is still Nothing, there was an I/O error
+              then maybe (replicate 40 '*') hexlify hash ++ "  " ++ dsnp          else dsnp
+      in formatHashID opt hid ++ hdsnp
 
 formatHashID :: Options -> Maybe Int64 -> String
 formatHashID opt hid =
