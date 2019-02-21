@@ -52,8 +52,8 @@ data Options = Options { _optSHA1   :: Bool
                        , optSLink   :: Bool
                        , optUnique  :: Bool
                        , optSI      :: Bool
-                       , optSort    :: Bool
-
+                       , _optSort   :: Bool
+                       , optSortCnt :: Bool
                        , _optPaths  :: [FilePath]
                        }
 
@@ -71,6 +71,9 @@ optHID = (> 0) . _optHID
 
 optSize :: Options -> Bool
 optSize opt = optOutUnspecified opt || _optSize opt
+
+optSort :: Options -> Bool
+optSort opt = _optSort opt && not (optSortCnt opt)
 
 optPaths :: Options -> [FilePath]
 optPaths opt = if null (_optPaths opt) then ["."] else _optPaths opt
@@ -106,8 +109,11 @@ parserOptions = Options
                             help "discard files which have already been accounted for")
                 <*> switch (long "si" <> short 't' <>
                             help "use powers of 1000 instead of 1024 for sizes")
+                -- TODO make the 2 sorting options mutually exclusive
                 <*> switch (long "sort" <> short 'S' <>
                             help "sort output, according to size")
+                <*> switch (long "sort-count" <> short 'N' <>
+                            help "sort output, according to count")
 
                 <*> many (argument str (metavar "PATHS..." <> help "files or directories (default: \".\")"))
 
@@ -162,11 +168,12 @@ main = do
       case ent_ of
         Nothing -> return Nothing
         Just ent -> do
-          unless (optSort opt) (printEntry ent)
+          unless (optSort opt || optSortCnt opt) (printEntry ent)
           return ent_
 
     let list = catMaybes list_
-    when (optSort opt) $ forM_ (sortOn _size list) printEntry
+    when (optSort opt)    $ forM_ (sortOn _size list) printEntry
+    when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
     when (optTotal opt) $
       printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0, 0)
                            (sortOn (takeFileName . _path) list)
@@ -298,6 +305,9 @@ combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d
         pack32 m = B.pack $ fromIntegral <$> [m, m `shiftR` 8, m `shiftR` 16, m `shiftR` 24]
 
 
+isDir :: Entry -> Bool
+isDir e = directoryMode == intersectFileModes directoryMode (fromIntegral $ _mode e)
+
 -- * Key
 
 data Key = NoKey | Inode Int64 | PathHash Int64 ByteString
@@ -357,11 +367,10 @@ fromRawString s = B.pack . concat $ charToBytes . ord <$> s
 -- * display
 
 showEntry :: Options -> Maybe Int64 -> Entry -> String
-showEntry opt hid (Entry path mode _ size du cnt hash) =
-  let isdir = directoryMode == intersectFileModes directoryMode (fromIntegral mode)
-      np    = if optCnt opt then
-                if isdir then printf "%14s" ("("++ show cnt ++ ")  ") ++ path
-                         else "              " ++ path
+showEntry opt hid ent@(Entry path _ _ size du cnt hash) =
+  let np    = if optCnt opt then
+                if isDir ent then printf "%14s" ("("++ show cnt ++ ")  ") ++ path
+                             else "              " ++ path
                 else path
       snp   = if optSize opt then formatSize opt size ++ "  " ++ np               else np
       dsnp  = if optDU opt then formatSize opt du ++ "  " ++ snp                  else snp
