@@ -54,6 +54,7 @@ data Options = Options { _optSHA1   :: Bool
                        , optSI      :: Bool
                        , _optSort   :: Bool
                        , optSortCnt :: Bool
+                       , optNoGit   :: Bool
                        , _optPaths  :: [FilePath]
                        }
 
@@ -76,7 +77,9 @@ optSort :: Options -> Bool
 optSort opt = _optSort opt && not (optSortCnt opt)
 
 optPaths :: Options -> [FilePath]
-optPaths opt = if null (_optPaths opt) then ["."] else _optPaths opt
+optPaths opt | null (_optPaths opt) = ["."]
+             | optNoGit opt         = filter ((/= ".git") . takeFileName) $ _optPaths opt
+             | otherwise            = _optPaths opt
 
 optCLevel :: Options -> CacheLevel
 optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
@@ -114,7 +117,8 @@ parserOptions = Options
                             help "sort output, according to size")
                 <*> switch (long "sort-count" <> short 'N' <>
                             help "sort output, according to count")
-
+                <*> switch (long "ignore-git" <> short 'G' <>
+                            help "ignore \".git\" filenames passed on the command line")
                 <*> many (argument str (metavar "PATHS..." <> help "files or directories (default: \".\")"))
 
 options :: ParserInfo Options
