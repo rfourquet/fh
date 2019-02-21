@@ -176,7 +176,7 @@ main = do
 
     mps <- filter (isJust . Mnt.uuid) <$> Mnt.points
 
-    list_ <- forM (mkEntry opt db seen mps <$> optPaths opt) $ \entIO_ -> do
+    list_ <- forM (mkEntry opt db False seen mps <$> optPaths opt) $ \entIO_ -> do
       ent_ <- entIO_
       case ent_ of
         Nothing -> return Nothing
@@ -213,12 +213,12 @@ data Entry = Entry { _path   :: FilePath
                    } deriving (Show)
 
 
-mkEntry :: Options -> DB -> IORef (Set (Int64, Int64)) -> [Mnt.Point] -> FilePath -> IO (Maybe Entry)
-mkEntry opt db seen mps path = do
+mkEntry  :: Options -> DB -> Bool -> IORef (Set (Int64, Int64)) -> [Mnt.Point] -> FilePath -> IO (Maybe Entry)
+mkEntry opt db quiet seen mps path = do
   status' <- try (getSymbolicLinkStatus path) :: IO (Either IOException FileStatus)
   now' <- getPOSIXTime
   case status' of
-    Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
+    Left exception -> do unless quiet $ hPutStrLn stderr $ "error: " ++ show exception
                          return Nothing
     Right status -> do
         key <- maybe (return NoKey) -- key won't be used when mp == Nothing
@@ -268,7 +268,7 @@ mkEntry' opt db seen mps path status key dbpath now'
       target <- readSymbolicLink path
       if optSLink opt || optALink opt && ".git/annex/objects/" `isInfixOf` target
       then do
-         ent <- mkEntry opt db seen mps (takeDirectory path </> target)
+         ent <- mkEntry opt db True seen mps (takeDirectory path </> target)
          return $ flip fmap ent $ \e -> e { _path = path }
       else
         -- we compute hash conditionally as directories containing only symlinks will otherwise
@@ -284,7 +284,7 @@ mkEntry' opt db seen mps path status key dbpath now'
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    return . Just $ Entry path mode False size du 0 Nothing
               Right files -> do
-                entries <- sequence $ mkEntry opt db seen mps . (path </>) <$> sort files :: IO [Maybe Entry]
+                entries <- sequence $ mkEntry opt db False seen mps . (path </>) <$> sort files :: IO [Maybe Entry]
                 let dir = combine (path, mode, True, size, du) $ catMaybes entries
                 when (_sizeOK dir) $
                   -- if the above condition is true, a read error occured somewhere and the info
