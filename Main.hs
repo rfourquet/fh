@@ -4,9 +4,10 @@ import           Control.Exception     (IOException, bracket, try)
 import           Control.Monad         (forM, forM_, unless, when)
 import qualified Crypto.Hash.SHA1      as SHA1
 import           Data.Bits             (shiftL, shiftR, (.&.), (.|.))
-import qualified Data.ByteString       as BS
+import           Data.ByteString       (ByteString)
+import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as Char8
-import qualified Data.ByteString.Lazy  as BSL
+import qualified Data.ByteString.Lazy  as BL
 import           Data.Char             (ord)
 import           Data.Int              (Int64)
 import           Data.IORef
@@ -185,7 +186,7 @@ data Entry = Entry { _path   :: FilePath
                    , _size   :: Int
                    , _du     :: Int
                    , _cnt    :: Int
-                   , _hash   :: Maybe BS.ByteString
+                   , _hash   :: Maybe ByteString
                    } deriving (Show)
 
 
@@ -218,7 +219,7 @@ mkEntry' opt db seen mps path status key dbpath now'
   | isRegularFile status = do
       let newent' = return . Just . Entry path mode True size du 1
           newent put = do
-            h' <- try $ sha1sum path :: IO (Either IOException BS.ByteString)
+            h' <- try $ sha1sum path :: IO (Either IOException ByteString)
             case h' of
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    newent' Nothing
@@ -246,7 +247,7 @@ mkEntry' opt db seen mps path status key dbpath now'
       else
         -- we compute hash conditionally as directories containing only symlinks will otherwise
         -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
-        -- seems the make the matter worse (requiring then to make the hash field strict...)
+        -- seems to make the matter worse (requiring then to make the hash field strict...)
         Just . Entry path mode True size du 1 <$>
           if optSHA1' opt then Just <$> sha1sumSymlink path
                           else return Nothing
@@ -262,9 +263,9 @@ mkEntry' opt db seen mps path status key dbpath now'
                 when (_sizeOK dir) $
                   -- if the above condition is true, a read error occured somewhere and the info
                   -- can't reliably be stored into the DB
-                  put db dbpath $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe BS.empty (_hash dir))
+                  put db dbpath $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe B.empty (_hash dir))
                 return . Just $ dir
-      let hcompat h = not (BS.null h && optSHA1' opt)
+      let hcompat h = not (B.null h && optSHA1' opt)
       entry_ <- getDB db dbpath $ fromKey key
       case entry_ of
         Nothing -> newent insertDB
@@ -273,8 +274,8 @@ mkEntry' opt db seen mps path status key dbpath now'
           | cl == 2 && t >= cmtime && hcompat h -> newent'
           | cl == 3 && hcompat h                -> newent'
           | otherwise                           -> newent updateDB
-          where newent' = return . Just $ Entry path mode True s d n (if BS.null h then Nothing else Just h)
-  | otherwise = return . Just . Entry path mode True size du 0 . Just $ BS.pack $ replicate 20 0
+          where newent' = return . Just $ Entry path mode True s d n (if B.null h then Nothing else Just h)
+  | otherwise = return . Just . Entry path mode True size du 0 . Just $ B.pack $ replicate 20 0
   where mode   = fromIntegral $ fileMode status
         cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
         now    = ceiling $ 10^(9::Int) * now'
@@ -283,7 +284,23 @@ mkEntry' opt db seen mps path status key dbpath now'
         cl     = optCLevel opt
 
 
-data Key = NoKey | Inode Int64 | PathHash Int64 BS.ByteString
+-- the 1st param gives non-cumulated (own) size and other data for resulting Entry
+combine :: (String, Word32, Bool, Int, Int) -> [Entry] -> Entry
+combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d0, 0, pure dirCtx) entries
+  where update (ok, s, d, n, ctx) (Entry p m ok' size du cnt hash) =
+          (ok && ok', s+size, d+du, n+cnt, SHA1.update <$> ctx <*>
+              fmap B.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack $ takeFileName p, Just $ B.singleton 0]))
+              -- The mode of a file has no effect on its hash, only on its containing dir's hash;
+              -- this is similar to how git does.
+              -- We add '\0' (`singleton 0`) to be sure that 2 unequal dirs won't have the same hash;
+              -- this assumes '\0' can't be in a file name.
+        finalize (ok, s, d, n, ctx) = Entry name mode ok s d n $ SHA1.finalize <$> ctx
+        pack32 m = B.pack $ fromIntegral <$> [m, m `shiftR` 8, m `shiftR` 16, m `shiftR` 24]
+
+
+-- * Key
+
+data Key = NoKey | Inode Int64 | PathHash Int64 ByteString
 
 highBit :: Int64
 highBit = 1 `shiftL` 63
@@ -305,7 +322,7 @@ mkKey status path follow unique mp =
   else do
     realpath <- canonicalizePath path
     let hash = SHA1.hash . fromRawString $ makeRelative (Mnt.target mp) realpath
-        ws   = fromIntegral <$> BS.unpack hash :: [Int64]
+        ws   = fromIntegral <$> B.unpack hash :: [Int64]
         h64  = mask62 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
     return $ PathHash (bits .|. h64) hash
   where bit1 = if follow && isDirectory status then highBit else 0
@@ -317,38 +334,24 @@ fromKey (Inode k)      = k
 fromKey (PathHash k _) = k
 fromKey NoKey          = error "invalid key"
 
-mkDBEntry :: (Key, Int64, Int, Int, Int, BS.ByteString) -> DBEntry
-mkDBEntry (Inode k, t, s, d, n, h)      = (k, t, s, d, n, h, BS.empty)
+mkDBEntry :: (Key, Int64, Int, Int, Int, ByteString) -> DBEntry
+mkDBEntry (Inode k, t, s, d, n, h)      = (k, t, s, d, n, h, B.empty)
 mkDBEntry (PathHash k p, t, s, d, n, h) = (k, t, s, d, n, h, p)
 mkDBEntry _                             = error "invalid key"
 
-keyMatches :: Key -> BS.ByteString -> Bool
-keyMatches (Inode _) p | BS.null p = True
+keyMatches :: Key -> ByteString -> Bool
+keyMatches (Inode _) p | B.null p  = True
                        | otherwise = error "unexpected key"
-keyMatches (PathHash _ p) p' | p == p' = True
+keyMatches (PathHash _ p) p' | p == p'   = True
                              | otherwise = False
 keyMatches NoKey _ = error "invalid key"
 
 -- this is a more robust alternative to fromString, which is not injective:
 -- indeed, e.g. "Mod\232les" and "Mod\56552les" are made into the same ByteString,
 -- which is a bug for the purpose of a crypto hash used as a signature
-fromRawString :: String -> BS.ByteString
-fromRawString s = BS.pack . concat $ charToBytes . ord <$> s
+fromRawString :: String -> ByteString
+fromRawString s = B.pack . concat $ charToBytes . ord <$> s
   where charToBytes c = fromIntegral <$> [c, c `shiftR` 8, c `shiftR` 16] -- ord (maxBound :: Char) < 2^24
-
-
--- the 1st param gives non-cumulated (own) size and other data for resulting Entry
-combine :: (String, Word32, Bool, Int, Int) -> [Entry] -> Entry
-combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d0, 0, pure dirCtx) entries
-  where update (ok, s, d, n, ctx) (Entry p m ok' size du cnt hash) =
-          (ok && ok', s+size, d+du, n+cnt, SHA1.update <$> ctx <*>
-              fmap BS.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack $ takeFileName p, Just $ BS.singleton 0]))
-              -- The mode of a file has no effect on its hash, only on its containing dir's hash;
-              -- this is similar to how git does.
-              -- We add '\0' (`singleton 0`) to be sure that 2 unequal dirs won't have the same hash;
-              -- this assumes '\0' can't be in a file name.
-        finalize (ok, s, d, n, ctx) = Entry name mode ok s d n $ SHA1.finalize <$> ctx
-        pack32 m = BS.pack $ fromIntegral <$> [m, m `shiftR` 8, m `shiftR` 16, m `shiftR` 24]
 
 
 -- * display
@@ -363,15 +366,11 @@ showEntry opt hid (Entry path mode _ size du cnt hash) =
       snp   = if optSize opt then formatSize opt size ++ "  " ++ np               else np
       dsnp  = if optDU opt then formatSize opt du ++ "  " ++ snp                  else snp
       hdsnp = if optSHA1 opt -- if hash is still Nothing, there was an I/O error
-              then maybe (replicate 40 '*') hexlify hash ++ "  " ++ dsnp          else dsnp
-      in formatHashID opt hid ++ hdsnp
-
-formatHashID :: Options -> Maybe Int64 -> String
-formatHashID opt hid =
-  if optHID opt
-  then let s = "#" ++ maybe "*" show hid
-       in printf "%5s  " s
-  else ""
+                then maybe (replicate 40 '*') hexlify hash ++ "  " ++ dsnp        else dsnp
+      in      if optHID opt
+                then let s = "#" ++ maybe "*" show hid
+                     in printf "%5s  " s ++ hdsnp
+                else hdsnp
 
 formatSize :: Options -> Int -> String
 formatSize opt sI =
@@ -387,22 +386,22 @@ formatSize opt sI =
 
 -- random seed for dirs
 dirCtx :: SHA1.Ctx
-dirCtx = SHA1.update SHA1.init $ BS.pack [0x2a, 0xc9, 0xd8, 0x3b, 0xc8, 0x7c, 0xe4, 0x86, 0xb2, 0x41,
-                                          0xd2, 0x27, 0xb4, 0x06, 0x93, 0x60, 0xc6, 0x2b, 0x52, 0x37]
+dirCtx = SHA1.update SHA1.init $ B.pack [0x2a, 0xc9, 0xd8, 0x3b, 0xc8, 0x7c, 0xe4, 0x86, 0xb2, 0x41,
+                                         0xd2, 0x27, 0xb4, 0x06, 0x93, 0x60, 0xc6, 0x2b, 0x52, 0x37]
 
 -- random seed for symlinks
 symlinkCtx :: SHA1.Ctx
-symlinkCtx = SHA1.update SHA1.init $ BS.pack [0x05, 0xfe, 0x0d, 0x17, 0xac, 0x9a, 0x10, 0xbc, 0x7d, 0xb1,
-                                              0x73, 0x99, 0xa6, 0xea, 0x92, 0x38, 0xfa, 0xda, 0x0f, 0x16]
+symlinkCtx = SHA1.update SHA1.init $ B.pack [0x05, 0xfe, 0x0d, 0x17, 0xac, 0x9a, 0x10, 0xbc, 0x7d, 0xb1,
+                                             0x73, 0x99, 0xa6, 0xea, 0x92, 0x38, 0xfa, 0xda, 0x0f, 0x16]
 
-sha1sumSymlink :: FilePath -> IO BS.ByteString
+sha1sumSymlink :: FilePath -> IO ByteString
 sha1sumSymlink path = SHA1.finalize . SHA1.update symlinkCtx . fromRawString <$> readSymbolicLink path
 
-sha1sum :: FilePath -> IO BS.ByteString
-sha1sum = fmap SHA1.hashlazy . BSL.readFile
+sha1sum :: FilePath -> IO ByteString
+sha1sum = fmap SHA1.hashlazy . BL.readFile
 
-hexlify :: BS.ByteString -> String
-hexlify bstr = let words8 = BS.unpack bstr
+hexlify :: ByteString -> String
+hexlify bstr = let words8 = B.unpack bstr
                    showHexPad x = if x >= 16 then showHex x else showChar '0' . showHex x
                    hex = map showHexPad words8
                in foldr ($) "" hex
