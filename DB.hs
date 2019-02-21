@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module DB (DB, DBEntry, closeDB, getDB, getHID, insertDB, newDB, updateDB) where
+module DB (DB, DBEntry, closeDB, getDB, getHID, insertDB, newDB, resetHID, updateDB) where
 
 import           Control.Monad    (forM, forM_, join, mapM_, (>=>))
 import qualified Data.ByteString  as BS
@@ -36,6 +36,9 @@ getDB db path key = fmap join . forM path $ setDB db >=> get' key
 
 getHID :: DB -> BS.ByteString -> IO Int64
 getHID db hash = join $ flip getHID' hash <$> getM db
+
+resetHID :: DB -> IO ()
+resetHID = getM >=> resetHID'
 
 
 -- * internal
@@ -170,3 +173,9 @@ getHID' db hash = do
     Row -> do
       [SQLInteger hid] <- typedColumns sel [Just IntegerColumn]
       return hid
+
+resetHID' :: IDMap -> IO ()
+resetHID' db = do
+  del <- prepare (_DBM db) "DELETE FROM [idmap]"
+  _ <- step del
+  finalize del

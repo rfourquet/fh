@@ -18,8 +18,9 @@ import           Data.Time.Clock.POSIX
 import           Data.Word             (Word32)
 import           Numeric               (showHex)
 import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, execParser,
-                                        footer, fullDesc, help, helper, info, long, many, metavar,
-                                        option, progDesc, readerError, short, str, switch, value)
+                                        flag', footer, fullDesc, help, helper, info, long, many,
+                                        metavar, option, progDesc, readerError, short, str, switch,
+                                        value)
 import           System.Directory      (canonicalizePath, listDirectory)
 import           System.FilePath       (makeRelative, takeDirectory, takeFileName, (<.>), (</>))
 import           System.IO             (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
@@ -38,7 +39,7 @@ import           Stat                  (fileBlockSize)
 -- * Options
 
 data Options = Options { _optSHA1   :: Bool
-                       , optHID     :: Bool
+                       , _optHID    :: Int
                        , _optSize   :: Bool
                        , optDU      :: Bool
                        , optTotal   :: Bool
@@ -62,6 +63,9 @@ optSHA1 opt = optOutUnspecified opt || _optSHA1 opt
 optSHA1' :: Options -> Bool -- whether sha1 must be computed
 optSHA1' opt = optSHA1 opt || optHID opt
 
+optHID :: Options -> Bool
+optHID = (> 0) . _optHID
+
 optSize :: Options -> Bool
 optSize opt = optOutUnspecified opt || _optSize opt
 
@@ -77,8 +81,9 @@ parserOptions :: Parser Options
 parserOptions = Options
                 <$> switch (long "sha1" <> short 'x' <>
                             help "print sha1 hash (in hexadecimal) (DEFAULT)")
-                <*> switch (long "hid" <> short '#' <>
-                            help "print unique (system-wide) integer ID corresponding to sha1 hash")
+                <*> (length <$> many (flag' () $
+                       long "hid" <> short '#' <>
+                       help "print unique (system-wide) integer ID corresponding to sha1 hash (use twice to reset the counter)"))
                 <*> switch (long "size" <> short 's' <>
                             help "print (apparent) size (DEFAULT)")
                 <*> switch (long "disk-usage" <> short 'd' <>
@@ -137,6 +142,7 @@ main = do
   opt <- execParser options
   seen <- newIORef Set.empty
   bracket newDB closeDB $ \db -> do
+    when (_optHID opt > 1) $ resetHID db
 
     let printEntry ent = do
           hid <- if optHID opt
