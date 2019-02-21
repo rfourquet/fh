@@ -1,7 +1,7 @@
 module Main where
 
 import           Control.Exception     (IOException, bracket, try)
-import           Control.Monad         (forM, forM_, unless, when)
+import           Control.Monad         (forM_, unless, when)
 import qualified Crypto.Hash.SHA1      as SHA1
 import           Data.Bits             (shiftL, shiftR, (.&.), (.|.))
 import           Data.ByteString       (ByteString)
@@ -9,6 +9,7 @@ import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy  as BL
 import           Data.Char             (ord)
+import           Data.Function         ((&))
 import           Data.Int              (Int64)
 import           Data.IORef
 import           Data.List             (find, foldl', isInfixOf, sort, sortOn)
@@ -23,6 +24,7 @@ import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, aut
                                         flag', footer, fullDesc, help, helper, info, long, many,
                                         metavar, option, progDesc, readerError, short, str, switch,
                                         value)
+import qualified Streaming.Prelude     as S
 import           System.Directory      (canonicalizePath, listDirectory)
 import           System.FilePath       (makeRelative, takeBaseName, takeDirectory, takeFileName,
                                         (<.>), (</>))
@@ -181,18 +183,16 @@ main = do
 
     mps <- filter (isJust . Mnt.uuid) <$> Mnt.points
 
-    list_ <- forM (mkEntry opt db False seen mps <$> optPaths opt) $ \entIO_ -> do
-      ent_ <- entIO_
-      case ent_ of
-        Nothing -> return Nothing
-        Just ent ->
-          if optMinSize opt * 1024 * 1024 <= _size ent &&
-             optMinCnt opt <= _cnt ent
-            then do unless (optSort opt || optSortCnt opt) (printEntry ent)
-                    return ent_
-            else return Nothing
+    let list' = S.each (optPaths opt)
+              & S.mapM (mkEntry opt db False seen mps)
+              & S.catMaybes
+              & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
+                                  optMinCnt opt <= _cnt ent)
 
-    let list = catMaybes list_
+    list <- S.toList_ $ if optSort opt || optSortCnt opt
+                          then list'
+                          else S.chain printEntry list'
+
     when (optSort opt)    $ forM_ (sortOn _size list) printEntry
     when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
     when (optTotal opt) $
