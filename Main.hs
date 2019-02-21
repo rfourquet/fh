@@ -12,18 +12,20 @@ import           Data.Char             (ord)
 import           Data.Int              (Int64)
 import           Data.IORef
 import           Data.List             (find, foldl', isInfixOf, sort, sortOn)
+import           Data.List.Split       (chunksOf, splitOn)
 import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust)
 import           Data.Set              (Set)
 import qualified Data.Set              as Set
 import           Data.Time.Clock.POSIX
-import           Data.Word             (Word32)
-import           Numeric               (showHex)
+import           Data.Word             (Word32, Word8)
+import           Numeric               (readHex, showHex)
 import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, execParser,
                                         flag', footer, fullDesc, help, helper, info, long, many,
                                         metavar, option, progDesc, readerError, short, str, switch,
                                         value)
 import           System.Directory      (canonicalizePath, listDirectory)
-import           System.FilePath       (makeRelative, takeDirectory, takeFileName, (<.>), (</>))
+import           System.FilePath       (makeRelative, takeBaseName, takeDirectory, takeFileName,
+                                        (<.>), (</>))
 import           System.IO             (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
                                         mkTextEncoding, stderr, stdin, stdout)
 import           System.Posix.Files    (FileStatus, deviceID, directoryMode, fileID, fileMode,
@@ -52,6 +54,7 @@ data Options = Options { _optSHA1   :: Bool
                        , optSLink   :: Bool
                        , optALink   :: Bool
                        , optUnique  :: Bool
+                       , optATrust  :: Bool
                        , optSI      :: Bool
                        , optMinSize :: Int
                        , optMinCnt  :: Int
@@ -115,6 +118,8 @@ parserOptions = Options
                             help "dereference all git-annex symbolic links")
                 <*> switch (long "unique" <> short 'u' <>
                             help "discard files which have already been accounted for")
+                <*> switch (long "trust-annex" <> short 'X' <>
+                            help "trust the SHA1 hash encoded in a git-annex file name")
                 <*> switch (long "si" <> short 't' <>
                             help "use powers of 1000 instead of 1024 for sizes")
                 <*> option auto (long "minsize" <> short 'z' <> value 0 <> metavar "INT" <>
@@ -253,17 +258,21 @@ mkEntry' opt db seen mps path status key dbpath now'
       if optSHA1' opt
         -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
         -- we can as well avoid the getDB call in this case, as a small optimization
-        then do
-          entry_ <- getDB db dbpath $ fromKey key
-          case entry_ of
-            Nothing -> newent insertDB
-            Just (_, t, s, _, _, h, p)
-              | s /= size                           -> newent updateDB
-              | not $ keyMatches key p              -> newent updateDB
-              | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
-              | cl == 3                             -> newent' $ Just h
-              | otherwise                           -> newent updateDB
-        else newent' Nothing
+      then do
+        let annexHash = if optATrust opt then getAnnexHash path else Nothing
+        if isJust annexHash
+          then newent' annexHash
+          else do
+            entry_ <- getDB db dbpath $ fromKey key
+            case entry_ of
+              Nothing -> newent insertDB
+              Just (_, t, s, _, _, h, p)
+                | s /= size                           -> newent updateDB
+                | not $ keyMatches key p              -> newent updateDB
+                | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
+                | cl == 3                             -> newent' $ Just h
+                | otherwise                           -> newent updateDB
+      else newent' Nothing
   | isSymbolicLink status = do
       target <- readSymbolicLink path
       if optSLink opt || optALink opt && ".git/annex/objects/" `isInfixOf` target
@@ -429,8 +438,25 @@ sha1sumSymlink = SHA1.finalize . SHA1.update symlinkCtx . fromRawString
 sha1sum :: FilePath -> IO ByteString
 sha1sum = fmap SHA1.hashlazy . BL.readFile
 
+-- TODO: check out Data.ByteString.Base16 to replace hexlify & unhexlify
+
 hexlify :: ByteString -> String
-hexlify bstr = let words8 = B.unpack bstr
+hexlify bstr = let ws = B.unpack bstr :: [Word8]
                    showHexPad x = if x >= 16 then showHex x else showChar '0' . showHex x
-                   hex = map showHexPad words8
+                   hex = showHexPad <$> ws
                in foldr ($) "" hex
+
+unhexlify :: String -> Maybe ByteString
+unhexlify h = let ws' = concatMap readHex $ chunksOf 2 h :: [(Word8, String)]
+                  valid = all (null . snd) ws'
+                  ws  = fst <$> ws'
+              in if valid then Just $ B.pack ws else Nothing
+
+getAnnexHash :: String -> Maybe ByteString
+getAnnexHash path =
+  let parts = splitOn "-" $ takeBaseName path
+  in case parts of
+     [backend, s, "", hex]
+       | backend `elem` ["SHA1", "SHA1E"] && head s == 's' && length hex == 40 -> unhexlify hex
+       | otherwise -> Nothing
+     _ -> Nothing
