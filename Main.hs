@@ -268,7 +268,7 @@ mkEntry' opt db seen mps path status key dbpath now'
         -- we compute hash conditionally as directories containing only symlinks will otherwise
         -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
         -- seems to make the matter worse (requiring then to make the hash field strict...)
-        Just . Entry path mode True size du 1 <$>
+        Just . Entry path mode True size du 0 <$>
           if optSHA1' opt then Just <$> sha1sumSymlink path
                           else return Nothing
   | isDirectory status = do
