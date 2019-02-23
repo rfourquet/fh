@@ -60,7 +60,8 @@ data Options = Options { _optSHA1   :: Bool
                        , optSI      :: Bool
                        , optMinSize :: Int
                        , optMinCnt  :: Int
-                       , _optSort   :: Bool
+                       , _optSortS  :: Bool
+                       , _optSortD  :: Bool
                        , optSortCnt :: Bool
                        , optNoGit   :: Bool
                        , optInitDB  :: Bool
@@ -82,8 +83,9 @@ optHID = (> 0) . _optHID
 optSize :: Options -> Bool
 optSize opt = optOutUnspecified opt || _optSize opt
 
-optSort :: Options -> Bool
-optSort opt = _optSort opt && not (optSortCnt opt)
+optSortS, optSortD :: Options -> Bool
+optSortS opt = _optSortS opt && not (optSortCnt opt || _optSortD opt)
+optSortD opt = _optSortD opt && not (optSortCnt opt)
 
 optPaths :: Options -> [FilePath]
 optPaths opt | null (_optPaths opt) = ["."]
@@ -129,9 +131,11 @@ parserOptions = Options
                                  help "smallest size to show, in MiB")
                 <*> option auto (long "mincount" <> short 'k' <> value 0 <> metavar "INT" <>
                                  help "smallest count to show")
-                -- TODO make the 2 sorting options mutually exclusive
+                -- TODO make the 3 sorting options mutually exclusive
                 <*> switch (long "sort" <> short 'S' <>
                             help "sort output, according to size")
+                <*> switch (long "sort-du" <> short 'D' <>
+                            help "sort output, according to disk usage")
                 <*> switch (long "sort-count" <> short 'N' <>
                             help "sort output, according to count")
                 <*> switch (long "ignore-git" <> short 'G' <>
@@ -193,11 +197,12 @@ main = do
                   & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
                                       optMinCnt opt <= _cnt ent)
 
-        list <- S.toList_ $ if optSort opt || optSortCnt opt
+        list <- S.toList_ $ if optSortS opt || optSortD opt || optSortCnt opt
                               then list'
                               else S.chain printEntry list'
 
-        when (optSort opt)    $ forM_ (sortOn _size list) printEntry
+        when (optSortS opt)   $ forM_ (sortOn _size list) printEntry
+        when (optSortD opt)   $ forM_ (sortOn _du   list) printEntry
         when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
         when (optTotal opt) $
           printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0, 0)
