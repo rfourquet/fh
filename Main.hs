@@ -25,7 +25,7 @@ import           Numeric               (readHex, showHex)
 import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, columns,
                                         customExecParser, flag', fullDesc, help, helper, info, long,
                                         many, metavar, option, prefs, progDesc, readerError, short,
-                                        str, switch, value)
+                                        str, strOption, switch, value)
 import qualified Streaming.Prelude     as S
 import           System.Directory      (canonicalizePath, listDirectory)
 import           System.FilePath       (makeRelative, takeBaseName, takeDirectory, takeFileName,
@@ -67,7 +67,7 @@ data Options = Options { optHelp    :: Bool
                        , _optSortD  :: Bool
                        , optSortCnt :: Bool
                        , optNoGit   :: Bool
-                       , optInitDB  :: Bool
+                       , optInitDB  :: FilePath
                        , _optPaths  :: [FilePath]
                        }
 
@@ -102,8 +102,8 @@ optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
 
 parserOptions :: Parser Options
 parserOptions = Options
-                <$> switch (long "help-cache" <> short '?' <>
-                            help "show help on the cache level option")
+                <$> switch (long "long-help" <> short '?' <>
+                            help "show help for --cache-level and --init-db options")
                 <*> switch (long "sha1" <> short 'x' <>
                             help "print sha1 hash (in hexadecimal) (DEFAULT)")
                 <*> (length <$> many (flag' () $
@@ -145,7 +145,8 @@ parserOptions = Options
                             help "sort output, according to count")
                 <*> switch (long "ignore-git" <> short 'G' <>
                             help "ignore \".git\" filenames passed on the command line")
-                <*> switch (long "init-db" <> help "create a global DB directory in /var/cache and exit")
+                <*> strOption (long "init-db" <> metavar "PATH" <> value "" <>
+                               help "create a DB directory at PATH and exit")
                 <*> many (argument str (metavar "PATHS..." <> help "files or directories (default: \".\")"))
 
 
@@ -165,20 +166,29 @@ clevel = do
 
 printHelp :: IO ()
 printHelp = putStrLn
-  " Cache level l: the cache (hash and size) is used if:                         \n\
-  \   * l ≥ 1 and the timestamp of a file is compatible,                         \n\
-  \   * l ≥ 2 and the timestamp of a directory is compatible, or                 \n\
-  \   * l = 3.                                                                   \n\
+  " --cache-level L: the cache (hash and size) is used if:                       \n\
+  \   * L ≥ 1 and the timestamp of a file is compatible,                         \n\
+  \   * L ≥ 2 and the timestamp of a directory is compatible, or                 \n\
+  \   * L = 3.                                                                   \n\
   \ The timestamp is said \"compatible\" if ctime (or mtime with the -m option)  \n\
   \ is older than the time of caching.                                           \n\
   \ When the size of a file has changed since cached, the hash is unconditionally\n\
-  \ re-computed (even when l = 3).                                               \n\
-  \ The default value of l is                                                    \n\
+  \ re-computed (even when L = 3).                                               \n\
+  \ The default value of L is                                                    \n\
   \   * 1 when hashes are requested (should be reliable in most cases)           \n\
   \       or when the unique option is active (it's otherwise easy to get        \n\
-  \       confusing results with l = 2), and                                     \n\
+  \       confusing results with L = 2), and                                     \n\
   \   * 2 when only the size is requested (this avoids to recursively traverse   \n\
-  \       directories, which would then be no better than du)."
+  \       directories, which would then be no better than du).                   \n\
+  \\n\
+  \ --init-db P: three locations are checked for the database directory,         \n\
+  \ in this order:                                                               \n\
+  \   * at the root of a device (e.g. /mnt/disk)                                 \n\
+  \   * at /var/cache/                                                           \n\
+  \   * at the XDG cache directory (usually ~/.cache/), created by default       \n\
+  \ The first of these allowing reading and writing is selected.                 \n\
+  \ The first two are only created on demand, with --init-db P,                  \n\
+  \ when P = /var/cache or e.g. P = /mnt/disk respectively.                      "
 
 
 -- * main
@@ -188,7 +198,7 @@ main = do
   mapM_ mkTranslitEncoding [stdout, stderr, stdin]
 
   opt <- customExecParser (prefs $ columns 79) options
-  if | optInitDB opt -> createDBDirectory
+  if | not . null $ optInitDB opt -> createDBDirectory $ optInitDB opt
      | optHelp opt -> printHelp
      | otherwise -> do
          seen <- newIORef Set.empty

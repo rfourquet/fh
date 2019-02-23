@@ -13,10 +13,11 @@ import           Data.String        (fromString)
 import           Database.SQLite3   (ColumnType (..), Database, SQLData (..), Statement,
                                      StepResult (..), bind, bindBlob, bindInt64, close, exec,
                                      finalize, open, prepare, reset, step, typedColumns)
-import           System.Directory   (XdgDirectory (XdgCache), createDirectoryIfMissing,
-                                     doesDirectoryExist, getPermissions, getXdgDirectory, readable,
-                                     writable)
-import           System.FilePath    ((<.>), (</>))
+import           System.Directory   (XdgDirectory (XdgCache), canonicalizePath,
+                                     createDirectoryIfMissing, doesDirectoryExist, getPermissions,
+                                     getXdgDirectory, readable, writable)
+import           System.FilePath    (dropTrailingPathSeparator, (<.>), (</>))
+import           System.IO          (hPutStrLn, stderr)
 import           System.Posix.Types (DeviceID)
 
 import qualified Mnt
@@ -65,35 +66,56 @@ getHID db hash = join $ flip getHID' hash <$> getM db
 resetHID :: DB -> IO ()
 resetHID = getM >=> resetHID'
 
-createDBDirectory :: IO ()
-createDBDirectory = do
-  (e, rw) <- checkGlobalDir
-  case (e, rw) of
-    (_, True)     -> putStrLn $ "cache directory already exists at \"" ++ _globalDir ++ "\""
-    (True, False) -> putStrLn $ "cache directory already exists at \"" ++ _globalDir ++
-                                "\"\n but is not readable or writable"
-    _ -> do createDirectoryIfMissing False _globalDir
-            putStrLn $ "created directory \"" ++ _globalDir ++ "\"\n (will be used when readable & writable)"
+createDBDirectory :: FilePath -> IO ()
+createDBDirectory path' = do
+  let path = dropTrailingPathSeparator path'
+      create dir = do
+        (e, rw) <- checkDir dir
+        case (e, rw) of
+          (_, True)     -> putStrLn $ "cache directory already exists at \"" ++ dir ++ "\""
+          (True, False) -> putStrLn $ "cache directory already exists at \"" ++ dir ++
+                                      "\"\n but is not readable or writable"
+          _ -> do createDirectoryIfMissing False dir
+                  putStrLn $ "created directory \"" ++ dir ++ "\"\n (will be used when readable & writable)"
+  if path == "/var/cache"
+    then create _globalDir
+  else do
+    p <- canonicalizePath path
+    mps <- filter (isJust . Mnt.uuid) <$> Mnt.points
+    case find ((== p) . Mnt.target) mps of
+      Nothing -> hPutStrLn stderr $ "error: " ++ path' ++ " is not /var/cache nor a moint point of a device with UUID"
+      Just _  -> create $ mkMntPointDir p
 
 
 -- * internal
 
+-- ** DB directories
+
 _globalDir :: FilePath
 _globalDir = "/var/cache/fh-" ++ fhID
 
-checkGlobalDir :: IO (Bool, Bool)
-checkGlobalDir = do
-  e <- doesDirectoryExist _globalDir
+mkMntPointDir :: FilePath -> FilePath
+mkMntPointDir root = root </> ".fh-" ++ fhID
+
+checkDir :: FilePath -> IO (Bool, Bool)
+checkDir dir = do
+  e <- doesDirectoryExist dir
   rw <- if e
-          then do p <- getPermissions _globalDir
+          then do p <- getPermissions dir
                   return $ readable p && writable p
           else return False
   return (e, rw)
 
-globalDir :: IO (Maybe FilePath)
-globalDir = do
-  (_, rw) <- checkGlobalDir
-  return $ if rw then Just _globalDir else Nothing
+globalDir :: Maybe Mnt.Point -> DeviceID -> IO (Maybe FilePath)
+globalDir mp' dev = do
+  case mp' of
+    Just mp -> do let mpDir = mkMntPointDir (Mnt.target mp)
+                  (_, rw) <- checkDir mpDir
+                  if rw then return $ Just mpDir
+                        else globalDir Nothing dev
+    Nothing -> do
+      (_, rw) <- do checkDir _globalDir
+      return $ if rw then Just _globalDir else Nothing
 
 userDir :: IO FilePath
 userDir = do
@@ -121,8 +143,9 @@ setDB (DB mps dbR _) dev = do
     Just db' | dev == _dev db' -> return $ Just db'
              | otherwise       -> close' db' >> setnew
     where setnew = do
-            dir <- fromMaybe <$> userDir <*> globalDir
-            case do mp <- find ((== dev) . Mnt.devid) mps
+            let mp' = find ((== dev) . Mnt.devid) mps
+            dir <- fromMaybe <$> userDir <*> globalDir mp' dev
+            case do mp <- mp'
                     uuid <- Mnt.uuid mp :: Maybe String
                     let path   = dir </> uuid <.> "v" ++ show version <.> "db"
                         hasIno = Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
