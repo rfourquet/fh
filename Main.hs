@@ -1,3 +1,5 @@
+{-# LANGUAGE MultiWayIf #-}
+
 module Main where
 
 import           Control.Exception     (IOException, bracket, try)
@@ -20,10 +22,10 @@ import qualified Data.Set              as Set
 import           Data.Time.Clock.POSIX
 import           Data.Word             (Word8)
 import           Numeric               (readHex, showHex)
-import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, execParser,
-                                        flag', footer, fullDesc, help, helper, info, long, many,
-                                        metavar, option, progDesc, readerError, short, str, switch,
-                                        value)
+import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, columns,
+                                        customExecParser, flag', fullDesc, help, helper, info, long,
+                                        many, metavar, option, prefs, progDesc, readerError, short,
+                                        str, switch, value)
 import qualified Streaming.Prelude     as S
 import           System.Directory      (canonicalizePath, listDirectory)
 import           System.FilePath       (makeRelative, takeBaseName, takeDirectory, takeFileName,
@@ -44,7 +46,8 @@ import           Stat                  (fileBlockSize)
 
 -- * Options
 
-data Options = Options { _optSHA1   :: Bool
+data Options = Options { optHelp    :: Bool
+                       , _optSHA1   :: Bool
                        , _optHID    :: Int
                        , _optSize   :: Bool
                        , optDU      :: Bool
@@ -99,7 +102,9 @@ optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
 
 parserOptions :: Parser Options
 parserOptions = Options
-                <$> switch (long "sha1" <> short 'x' <>
+                <$> switch (long "help-cache" <> short '?' <>
+                            help "show help on the cache level option")
+                <*> switch (long "sha1" <> short 'x' <>
                             help "print sha1 hash (in hexadecimal) (DEFAULT)")
                 <*> (length <$> many (flag' () $
                        long "hid" <> short '#' <>
@@ -148,18 +153,6 @@ options :: ParserInfo Options
 options = info (helper <*> parserOptions)
           $  fullDesc
           <> progDesc "compute and cache the sha1 hash and size of files and directories"
-          <> footer "Cache level l: the cache (hash and size) is used if:                                      \
-                    \ l ≥ 1 and the timestamp of a file is compatible,                                         \
-                    \ l ≥ 2 and the timestamp of a directory is compatible,                                    \
-                    \ or l = 3.                                                                                \
-                    \ The timestamp is said \"compatible\" if ctime (or mtime with the -m option)              \
-                    \ is older than the time of caching.                                                       \
-                    \ When the size of a file has changed since cached, the hash is unconditionally            \
-                    \ re-computed (even when l = 3).                                                           \
-                    \ The default value of l is 1 when hashes are requested (should be reliable in most cases) \
-                    \ or when the unique option is active (it's otherwise easy to get confusing results with   \
-                    \ l = 2), and 2 when only the size is requested (this avoids to recursively traverse       \
-                    \ directories, which would then be no better than du)."
 
 type CacheLevel = Int
 
@@ -170,6 +163,23 @@ clevel = do
     then return i
     else readerError "cache level isn't in the range 0..3"
 
+printHelp :: IO ()
+printHelp = putStrLn
+  " Cache level l: the cache (hash and size) is used if:                         \n\
+  \   * l ≥ 1 and the timestamp of a file is compatible,                         \n\
+  \   * l ≥ 2 and the timestamp of a directory is compatible, or                 \n\
+  \   * l = 3.                                                                   \n\
+  \ The timestamp is said \"compatible\" if ctime (or mtime with the -m option)  \n\
+  \ is older than the time of caching.                                           \n\
+  \ When the size of a file has changed since cached, the hash is unconditionally\n\
+  \ re-computed (even when l = 3).                                               \n\
+  \ The default value of l is                                                    \n\
+  \   * 1 when hashes are requested (should be reliable in most cases)           \n\
+  \       or when the unique option is active (it's otherwise easy to get        \n\
+  \       confusing results with l = 2), and                                     \n\
+  \   * 2 when only the size is requested (this avoids to recursively traverse   \n\
+  \       directories, which would then be no better than du)."
+
 
 -- * main
 
@@ -177,36 +187,36 @@ main :: IO ()
 main = do
   mapM_ mkTranslitEncoding [stdout, stderr, stdin]
 
-  opt <- execParser options
-  if optInitDB opt
-    then createDBDirectory
-    else do
-      seen <- newIORef Set.empty
-      bracket newDB closeDB $ \db -> do
-        when (_optHID opt > 1) $ resetHID db
+  opt <- customExecParser (prefs $ columns 79) options
+  if | optInitDB opt -> createDBDirectory
+     | optHelp opt -> printHelp
+     | otherwise -> do
+         seen <- newIORef Set.empty
+         bracket newDB closeDB $ \db -> do
+           when (_optHID opt > 1) $ resetHID db
 
-        let printEntry ent = do
-              hid <- if optHID opt
-                       then sequence $ getHID db <$> _hash ent
-                       else return Nothing
-              putStrLn . showEntry opt hid $ ent
+           let printEntry ent = do
+                 hid <- if optHID opt
+                          then sequence $ getHID db <$> _hash ent
+                          else return Nothing
+                 putStrLn . showEntry opt hid $ ent
 
-        let list' = S.each (optPaths opt)
-                  & S.mapM (mkEntry opt db False seen)
-                  & S.catMaybes
-                  & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
-                                      optMinCnt opt <= _cnt ent)
+           let list' = S.each (optPaths opt)
+                     & S.mapM (mkEntry opt db False seen)
+                     & S.catMaybes
+                     & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
+                                         optMinCnt opt <= _cnt ent)
 
-        list <- S.toList_ $ if optSortS opt || optSortD opt || optSortCnt opt
-                              then list'
-                              else S.chain printEntry list'
+           list <- S.toList_ $ if optSortS opt || optSortD opt || optSortCnt opt
+                                 then list'
+                                 else S.chain printEntry list'
 
-        when (optSortS opt)   $ forM_ (sortOn _size list) printEntry
-        when (optSortD opt)   $ forM_ (sortOn _du   list) printEntry
-        when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
-        when (optTotal opt) $
-          printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0, 0)
-                               (sortOn (takeFileName . _path) list)
+           when (optSortS opt)   $ forM_ (sortOn _size list) printEntry
+           when (optSortD opt)   $ forM_ (sortOn _du   list) printEntry
+           when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
+           when (optTotal opt) $
+             printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0, 0)
+                                  (sortOn (takeFileName . _path) list)
 
 
 mkTranslitEncoding :: Handle -> IO ()
