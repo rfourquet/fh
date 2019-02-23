@@ -1,14 +1,14 @@
 module Mnt where
 
-import Data.Int        (Int64)
-import Data.List       (isSuffixOf)
-import Data.List.Split (splitOn)
-import System.Process  (readProcess)
+import Data.List          (isSuffixOf)
+import Data.List.Split    (splitOn)
+import System.Posix.Types (DeviceID)
+import System.Process     (readProcess)
 
 data Point = Point { target  :: FilePath
                    , fstype  :: String
                    , options :: String
-                   , devid   :: Int64
+                   , devid   :: DeviceID
                    , uuid    :: Maybe String
                    , bind    :: Maybe FilePath
                    } deriving (Show)

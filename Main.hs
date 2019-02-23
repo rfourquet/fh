@@ -35,6 +35,7 @@ import           System.Posix.Files    (FileStatus, deviceID, directoryMode, fil
                                         isDirectory, isRegularFile, isSymbolicLink,
                                         modificationTimeHiRes, readSymbolicLink,
                                         statusChangeTimeHiRes)
+import           System.Posix.Types    (DeviceID, FileID)
 import           Text.Printf           (printf)
 
 import           DB
@@ -215,7 +216,7 @@ data Entry = Entry { _path   :: FilePath
                    } deriving (Show)
 
 
-mkEntry  :: Options -> DB -> Bool -> IORef (Set (Int64, Int64)) -> FilePath -> IO (Maybe Entry)
+mkEntry  :: Options -> DB -> Bool -> IORef (Set (DeviceID, FileID)) -> FilePath -> IO (Maybe Entry)
 mkEntry opt db quiet seen path = do
   status' <- try (getSymbolicLinkStatus path) :: IO (Either IOException FileStatus)
   now' <- getPOSIXTime
@@ -226,13 +227,13 @@ mkEntry opt db quiet seen path = do
         seen' <- if optUnique opt
                    then readIORef seen
                    else return Set.empty
-        let devino = (fromIntegral $ deviceID status, fromIntegral . fileID $ status)
+        let devino = (deviceID status, fileID status)
         if optUnique opt && Set.member devino seen'
           then return Nothing
           else do writeIORef seen $ Set.insert devino seen'
                   mkEntry' opt db seen path status now'
 
-mkEntry' :: Options -> DB -> IORef (Set (Int64, Int64))
+mkEntry' :: Options -> DB -> IORef (Set (DeviceID, FileID))
          -> FilePath -> FileStatus -> POSIXTime
          -> IO (Maybe Entry)
 mkEntry' opt db seen path status now'
@@ -303,7 +304,7 @@ mkEntry' opt db seen path status now'
           | otherwise                           -> newent updateDB
           where newent' = return . Just $ Entry path mode True s d n (if B.null h then Nothing else Just h)
   | otherwise = return . Just . Entry path mode True size du 0 . Just $ B.pack $ replicate 20 0
-  where dev    = fromIntegral $ deviceID status
+  where dev    = deviceID status
         mode   = fromIntegral $ fileMode status
         cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
         now    = ceiling $ 10^(9::Int) * now'
@@ -331,33 +332,33 @@ isDir e = directoryMode == intersectFileModes directoryMode (fromIntegral $ _mod
 
 -- * Key
 
-data Key = Inode Int64 | PathHash Int64 ByteString
+data Key = Inode DBKey | PathHash DBKey ByteString
 
 
-highBit, highBit', highBit'' :: Int64
+highBit, highBit', highBit'' :: DBKey
 highBit   = 1 `shiftL` 63
 highBit'  = 1 `shiftL` 62
 highBit'' = 1 `shiftL` 61
 
-mask61 :: Int64 -> Int64
+mask61 :: DBKey -> DBKey
 mask61 = (.&. (highBit'' - 1))
 
--- the three high bits of the Int64 part of the Key for directories
+-- the three high bits of the DBKey part of the Key for directories
 -- encode whether symbolic links are followed, git-annex links are
 -- followed, or only unique files are handled
 mkKey :: Options -> DB -> FileStatus -> FilePath -> IO Key
 mkKey opt db status path = do
-  target' <- getTarget db . fromIntegral $ deviceID status :: IO (Maybe FilePath)
+  target' <- getTarget db $ deviceID status :: IO (Maybe FilePath)
   case target' of
     Nothing ->
-      let ino = fromIntegral . fileID $ status :: Int64
+      let ino = fromIntegral . fileID $ status :: DBKey
       in if mask61 ino == ino
            then return $ Inode $ bits .|. ino
            else error "unexpected inode number"
     Just target -> do
       realpath <- canonicalizePath path
       let hash = SHA1.hash . fromRawString $ makeRelative target realpath
-          ws   = fromIntegral <$> B.unpack hash :: [Int64]
+          ws   = fromIntegral <$> B.unpack hash :: [DBKey]
           h64  = mask61 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
       return $ PathHash (bits .|. h64) hash
   where bit   = if optSLink  opt && isDirectory status then highBit   else 0
@@ -365,7 +366,7 @@ mkKey opt db status path = do
         bit'' = if optUnique opt && isDirectory status then highBit'' else 0
         bits  = bit .|. bit' .|. bit''
 
-fromKey :: Key -> Int64
+fromKey :: Key -> DBKey
 fromKey (Inode k)      = k
 fromKey (PathHash k _) = k
 
