@@ -1,38 +1,57 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module DB (DB, DBEntry, closeDB, getDB, getHID, insertDB, newDB, resetHID, updateDB) where
+module DB (DB, DBEntry, closeDB, getDB, getHID, getTarget, insertDB, newDB, resetHID, updateDB) where
 
-import           Control.Monad    (forM, forM_, join, mapM_, (>=>))
+import           Control.Monad    (join, mapM_, (>=>))
 import qualified Data.ByteString  as BS
 import           Data.Int         (Int64)
 import           Data.IORef
+import           Data.List        (find)
+import           Data.Maybe       (isJust)
 import           Data.String      (fromString)
 import           Database.SQLite3 (ColumnType (..), Database, SQLData (..), Statement,
                                    StepResult (..), bind, bindBlob, bindInt64, close, exec,
                                    finalize, open, prepare, reset, step, typedColumns)
+import           System.FilePath  ((<.>), (</>))
+
+import qualified Mnt
+
+
+fhID :: String
+fhID = "XSfaWmMBsldaiatb9rjmMwKers"
+
+version :: Int
+version = 0
+
 
 -- * public API
 
-type DB = IORef (Maybe DB', Maybe IDMap)
+data DB = DB [Mnt.Point] (IORef (Maybe DB')) (IORef (Maybe IDMap))
 type DBEntry = (Int64, Int64, Int, Int, Int, BS.ByteString, BS.ByteString)
 
+
 newDB :: IO DB
-newDB = newIORef (Nothing, Nothing)
+newDB =
+  DB <$> (filter (isJust . Mnt.uuid) <$> Mnt.points)
+     <*> newIORef Nothing
+     <*> newIORef Nothing
 
 closeDB :: DB -> IO ()
-closeDB db = do
-  (db', dbm) <- readIORef db
-  mapM_ close' db'
-  mapM_ closeM dbm
+closeDB (DB _ db' dbm) = do
+   readIORef db' >>= mapM_ close'
+   readIORef dbm >>= mapM_ closeM
 
-insertDB :: DB -> Maybe FilePath -> DBEntry -> IO ()
-insertDB db path entry = forM_ path $ setDB db >=> insert' entry
+insertDB :: DB -> Int64 -> DBEntry -> IO ()
+insertDB db dev entry = setDB db dev >>= mapM_ (insert' entry)
 
-updateDB :: DB -> Maybe FilePath -> DBEntry -> IO ()
-updateDB db path entry = forM_ path $ setDB db >=> update' entry
+updateDB :: DB -> Int64 -> DBEntry -> IO ()
+updateDB db dev entry = setDB db dev >>= mapM_ (update' entry)
 
-getDB :: DB -> Maybe FilePath -> Int64 -> IO (Maybe DBEntry)
-getDB db path key = fmap join . forM path $ setDB db >=> get' key
+getDB :: DB -> Int64 -> Int64 -> IO (Maybe DBEntry)
+getDB db dev key = fmap join $ setDB db dev >>= mapM (get' key)
+
+getTarget :: DB -> Int64 -> IO (Maybe FilePath)
+getTarget db dev = join . fmap _mntTarget <$> setDB db dev
 
 getHID :: DB -> BS.ByteString -> IO Int64
 getHID db hash = join $ flip getHID' hash <$> getM db
@@ -45,27 +64,37 @@ resetHID = getM >=> resetHID'
 
 -- ** DB'
 
-data DB' = DB' { _path :: FilePath
-               , _DB   :: Database
-               , _ins  :: Statement
-               , _upd  :: Statement
-               , _get  :: Statement
+data DB' = DB' { _dev       :: Int64
+               , _mntTarget :: Maybe FilePath -- Nothing when filesystem supports inodes
+               , _path      :: FilePath
+               , _DB        :: Database
+               , _ins       :: Statement
+               , _upd       :: Statement
+               , _get       :: Statement
                }
 
-setDB :: DB -> FilePath -> IO DB'
-setDB db path = do
-  (db_, dbm) <- readIORef db
-  case db_ of
-    Nothing -> setnew dbm
-    Just db' | path == _path db' -> return db'
-             | otherwise         -> close' db' >> setnew dbm
-    where setnew dbm = do
-            db'' <- open' path
-            writeIORef db (Just db'', dbm)
-            return db''
+setDB :: DB -> Int64 -> IO (Maybe DB')
+setDB (DB mps dbR _) dev = do
+  db_' <- readIORef dbR
+  case db_' of
+    Nothing -> setnew
+    Just db' | dev == _dev db' -> return $ Just db'
+             | otherwise       -> close' db' >> setnew
+    where setnew =
+            case do mp <- find ((== dev) . Mnt.devid) mps
+                    uuid <- Mnt.uuid mp :: Maybe String
+                    let dir    = "/var/cache/fh-" ++ fhID
+                        path   = dir </> uuid <.> "v" ++ show version <.> "db"
+                        hasIno = Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
+                    return (path, if hasIno then Nothing else Just $ Mnt.target mp)
+              of Nothing -> return Nothing
+                 Just (path, target) -> do
+                   db'' <- open' dev target path
+                   writeIORef dbR $ Just db''
+                   return $ Just db''
 
-open' :: FilePath -> IO DB'
-open' path = do
+open' :: Int64 -> Maybe FilePath -> FilePath -> IO DB'
+open' dev target path = do
   db <- open $ fromString path
   exec db  " CREATE TABLE IF NOT EXISTS files ( \
            \   key   INTEGER PRIMARY KEY,       \
@@ -77,7 +106,7 @@ open' path = do
            \   hpath BLOB                     ) "
   -- utime: update time
   exec db "BEGIN TRANSACTION"
-  DB' path db
+  DB' dev target path db
     <$> prepare db "INSERT INTO files values (?, ?, ?, ?, ?, ?, ?)"
     <*> prepare db "UPDATE files SET utime=?, size=?, du=?, cnt=?, sha1=?, hpath=? WHERE key=?"
     <*> prepare db "SELECT * FROM files WHERE key=?"
@@ -128,18 +157,18 @@ data IDMap = IDMap { _DBM  :: Database
                    }
 
 getM :: DB -> IO IDMap
-getM db = do
-  (db_, dbm') <- readIORef db
+getM (DB _ _ dbR) = do
+  dbm' <- readIORef dbR
   case dbm' of
     Nothing -> do
       dbm <- openM
-      writeIORef db (db_, Just dbm)
+      writeIORef dbR $ Just dbm
       return dbm
     Just dbm -> return dbm
 
 openM :: IO IDMap
 openM = do
-  db <- open "/tmp/fh-IDMap-XSfaWmMBsldaiatb9rjmMwKers.db"
+  db <- open $ fromString $ "/tmp/fh-IDMap-" ++ fhID ++ ".db"
   exec db " CREATE TABLE IF NOT EXISTS [idmap] ( \
           \   sha1 BLOB PRIMARY KEY,             \
           \   id   INTEGER UNIQUE              ) "

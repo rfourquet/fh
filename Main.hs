@@ -27,7 +27,7 @@ import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, aut
 import qualified Streaming.Prelude     as S
 import           System.Directory      (canonicalizePath, listDirectory)
 import           System.FilePath       (makeRelative, takeBaseName, takeDirectory, takeFileName,
-                                        (<.>), (</>))
+                                        (</>))
 import           System.IO             (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
                                         mkTextEncoding, stderr, stdin, stdout)
 import           System.Posix.Files    (FileStatus, deviceID, directoryMode, fileID, fileMode,
@@ -38,7 +38,6 @@ import           System.Posix.Files    (FileStatus, deviceID, directoryMode, fil
 import           Text.Printf           (printf)
 
 import           DB
-import qualified Mnt
 import           Stat                  (fileBlockSize)
 
 
@@ -181,10 +180,8 @@ main = do
                    else return Nothing
           putStrLn . showEntry opt hid $ ent
 
-    mps <- filter (isJust . Mnt.uuid) <$> Mnt.points
-
     let list' = S.each (optPaths opt)
-              & S.mapM (mkEntry opt db False seen mps)
+              & S.mapM (mkEntry opt db False seen)
               & S.catMaybes
               & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
                                   optMinCnt opt <= _cnt ent)
@@ -218,42 +215,35 @@ data Entry = Entry { _path   :: FilePath
                    } deriving (Show)
 
 
-mkEntry  :: Options -> DB -> Bool -> IORef (Set (Int64, Int64)) -> [Mnt.Point] -> FilePath -> IO (Maybe Entry)
-mkEntry opt db quiet seen mps path = do
+mkEntry  :: Options -> DB -> Bool -> IORef (Set (Int64, Int64)) -> FilePath -> IO (Maybe Entry)
+mkEntry opt db quiet seen path = do
   status' <- try (getSymbolicLinkStatus path) :: IO (Either IOException FileStatus)
   now' <- getPOSIXTime
   case status' of
     Left exception -> do unless quiet $ hPutStrLn stderr $ "error: " ++ show exception
                          return Nothing
     Right status -> do
-        key <- maybe (return NoKey) -- key won't be used when mp == Nothing
-                     (mkKey status path (optSLink opt) (optALink opt) (optUnique opt))
-                     mp
         seen' <- if optUnique opt
                    then readIORef seen
                    else return Set.empty
-        let devino = (dev, fromIntegral . fileID $ status)
+        let devino = (fromIntegral $ deviceID status, fromIntegral . fileID $ status)
         if optUnique opt && Set.member devino seen'
           then return Nothing
           else do writeIORef seen $ Set.insert devino seen'
-                  mkEntry' opt db seen mps path status key dbpath now'
-      where dev    = fromIntegral $ deviceID status
-            mp     = find ((== dev) . Mnt.devid) mps
-            uuid   = mp >>= Mnt.uuid :: Maybe String
-            dbpath = (\x -> "/var/cache/fh" </> x <.> "db") <$> uuid :: Maybe FilePath
+                  mkEntry' opt db seen path status now'
 
-mkEntry' :: Options -> DB -> IORef (Set (Int64, Int64)) -> [Mnt.Point] -> FilePath
-         -> FileStatus -> Key -> Maybe FilePath -> POSIXTime
+mkEntry' :: Options -> DB -> IORef (Set (Int64, Int64))
+         -> FilePath -> FileStatus -> POSIXTime
          -> IO (Maybe Entry)
-mkEntry' opt db seen mps path status key dbpath now'
+mkEntry' opt db seen path status now'
   | isRegularFile status = do
       let newent' = return . Just . Entry path mode True size du 1
-          newent put = do
+          newent put key = do
             h' <- try $ sha1sum path :: IO (Either IOException ByteString)
             case h' of
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    newent' Nothing
-              Right h        -> do _ <- put db dbpath $ mkDBEntry (key, now, size, du, 1, h)
+              Right h        -> do _ <- put db dev $ mkDBEntry (key, now, size, du, 1, h)
                                    newent' $ Just h
       if optSHA1' opt
         -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
@@ -263,21 +253,22 @@ mkEntry' opt db seen mps path status key dbpath now'
         if isJust annexHash
           then newent' annexHash
           else do
-            entry_ <- getDB db dbpath $ fromKey key
+            key <- mkKey opt db status path
+            entry_ <- getDB db dev $ fromKey key
             case entry_ of
-              Nothing -> newent insertDB
+              Nothing -> newent insertDB key
               Just (_, t, s, _, _, h, p)
-                | s /= size                           -> newent updateDB
-                | not $ keyMatches key p              -> newent updateDB
+                | s /= size                           -> newent updateDB key
+                | not $ keyMatches key p              -> newent updateDB key
                 | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
                 | cl == 3                             -> newent' $ Just h
-                | otherwise                           -> newent updateDB
+                | otherwise                           -> newent updateDB key
       else newent' Nothing
   | isSymbolicLink status = do
       target <- readSymbolicLink path
       if optSLink opt || optALink opt && ".git/annex/objects/" `isInfixOf` target
       then do
-         ent <- mkEntry opt db True seen mps (takeDirectory path </> target)
+         ent <- mkEntry opt db True seen (takeDirectory path </> target)
          return $ flip fmap ent $ \e -> e { _path = path }
       else
         -- we compute hash conditionally as directories containing only symlinks will otherwise
@@ -287,21 +278,22 @@ mkEntry' opt db seen mps path status key dbpath now'
           if optSHA1' opt then Just $ sha1sumSymlink target
                           else Nothing
   | isDirectory status = do
+      key <- mkKey opt db status path
       let newent put = do
             files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
             case files' of
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    return . Just $ Entry path mode False size du 0 Nothing
               Right files -> do
-                entries <- sequence $ mkEntry opt db False seen mps . (path </>) <$> sort files :: IO [Maybe Entry]
+                entries <- sequence $ mkEntry opt db False seen . (path </>) <$> sort files :: IO [Maybe Entry]
                 let dir = combine (path, mode, True, size, du) $ catMaybes entries
                 when (_sizeOK dir) $
                   -- if the above condition is true, a read error occured somewhere and the info
                   -- can't reliably be stored into the DB
-                  put db dbpath $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe B.empty (_hash dir))
+                  put db dev $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe B.empty (_hash dir))
                 return . Just $ dir
       let hcompat h = not (B.null h && optSHA1' opt)
-      entry_ <- getDB db dbpath $ fromKey key
+      entry_ <- getDB db dev $ fromKey key
       case entry_ of
         Nothing -> newent insertDB
         Just (_, t, s, d, n, h, p)
@@ -311,7 +303,8 @@ mkEntry' opt db seen mps path status key dbpath now'
           | otherwise                           -> newent updateDB
           where newent' = return . Just $ Entry path mode True s d n (if B.null h then Nothing else Just h)
   | otherwise = return . Just . Entry path mode True size du 0 . Just $ B.pack $ replicate 20 0
-  where mode   = fromIntegral $ fileMode status
+  where dev    = fromIntegral $ deviceID status
+        mode   = fromIntegral $ fileMode status
         cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
         now    = ceiling $ 10^(9::Int) * now'
         size   = fromIntegral $ fileSize status
@@ -338,7 +331,8 @@ isDir e = directoryMode == intersectFileModes directoryMode (fromIntegral $ _mod
 
 -- * Key
 
-data Key = NoKey | Inode Int64 | PathHash Int64 ByteString
+data Key = Inode Int64 | PathHash Int64 ByteString
+
 
 highBit, highBit', highBit'' :: Int64
 highBit   = 1 `shiftL` 63
@@ -348,42 +342,43 @@ highBit'' = 1 `shiftL` 61
 mask61 :: Int64 -> Int64
 mask61 = (.&. (highBit'' - 1))
 
--- the high bit of the Int64 part of the Key encodes whether
--- symbolic links are followed
-mkKey :: FileStatus -> FilePath -> Bool -> Bool -> Bool -> Mnt.Point -> IO Key
-mkKey status path follow followA unique mp =
-  if Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
-  then let ino = fromIntegral . fileID $ status :: Int64
-       in if mask61 ino == ino
-          then return $ Inode $ bits .|. ino
-          else error "unexpected negative inode number"
-  else do
-    realpath <- canonicalizePath path
-    let hash = SHA1.hash . fromRawString $ makeRelative (Mnt.target mp) realpath
-        ws   = fromIntegral <$> B.unpack hash :: [Int64]
-        h64  = mask61 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
-    return $ PathHash (bits .|. h64) hash
-  where bit   = if follow  && isDirectory status then highBit   else 0
-        bit'  = if followA && isDirectory status then highBit'  else 0
-        bit'' = if unique  && isDirectory status then highBit'' else 0
-        bits = bit .|. bit' .|. bit''
+-- the three high bits of the Int64 part of the Key for directories
+-- encode whether symbolic links are followed, git-annex links are
+-- followed, or only unique files are handled
+mkKey :: Options -> DB -> FileStatus -> FilePath -> IO Key
+mkKey opt db status path = do
+  target' <- getTarget db . fromIntegral $ deviceID status :: IO (Maybe FilePath)
+  case target' of
+    Nothing ->
+      let ino = fromIntegral . fileID $ status :: Int64
+      in if mask61 ino == ino
+           then return $ Inode $ bits .|. ino
+           else error "unexpected inode number"
+    Just target -> do
+      realpath <- canonicalizePath path
+      let hash = SHA1.hash . fromRawString $ makeRelative target realpath
+          ws   = fromIntegral <$> B.unpack hash :: [Int64]
+          h64  = mask61 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
+      return $ PathHash (bits .|. h64) hash
+  where bit   = if optSLink  opt && isDirectory status then highBit   else 0
+        bit'  = if optALink  opt && isDirectory status then highBit'  else 0
+        bit'' = if optUnique opt && isDirectory status then highBit'' else 0
+        bits  = bit .|. bit' .|. bit''
 
 fromKey :: Key -> Int64
 fromKey (Inode k)      = k
 fromKey (PathHash k _) = k
-fromKey NoKey          = error "invalid key"
 
 mkDBEntry :: (Key, Int64, Int, Int, Int, ByteString) -> DBEntry
 mkDBEntry (Inode k, t, s, d, n, h)      = (k, t, s, d, n, h, B.empty)
 mkDBEntry (PathHash k p, t, s, d, n, h) = (k, t, s, d, n, h, p)
-mkDBEntry _                             = error "invalid key"
 
 keyMatches :: Key -> ByteString -> Bool
 keyMatches (Inode _) p | B.null p  = True
                        | otherwise = error "unexpected key"
 keyMatches (PathHash _ p) p' | p == p'   = True
                              | otherwise = False
-keyMatches NoKey _ = error "invalid key"
+
 
 -- this is a more robust alternative to fromString, which is not injective:
 -- indeed, e.g. "Mod\232les" and "Mod\56552les" are made into the same ByteString,
