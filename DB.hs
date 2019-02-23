@@ -67,8 +67,13 @@ resetHID = getM >=> resetHID'
 
 createDBDirectory :: IO ()
 createDBDirectory = do
-  createDirectoryIfMissing False _globalDir
-  putStrLn $ "created directory \"" ++ _globalDir ++ "\" (will be used when readable & writable)"
+  (e, rw) <- checkGlobalDir
+  case (e, rw) of
+    (_, True)     -> putStrLn $ "cache directory already exists at \"" ++ _globalDir ++ "\""
+    (True, False) -> putStrLn $ "cache directory already exists at \"" ++ _globalDir ++
+                                "\"\n but is not readable or writable"
+    _ -> do createDirectoryIfMissing False _globalDir
+            putStrLn $ "created directory \"" ++ _globalDir ++ "\"\n (will be used when readable & writable)"
 
 
 -- * internal
@@ -76,13 +81,18 @@ createDBDirectory = do
 _globalDir :: FilePath
 _globalDir = "/var/cache/fh-" ++ fhID
 
-globalDir :: IO (Maybe FilePath)
-globalDir = do
+checkGlobalDir :: IO (Bool, Bool)
+checkGlobalDir = do
   e <- doesDirectoryExist _globalDir
   rw <- if e
           then do p <- getPermissions _globalDir
                   return $ readable p && writable p
           else return False
+  return (e, rw)
+
+globalDir :: IO (Maybe FilePath)
+globalDir = do
+  (_, rw) <- checkGlobalDir
   return $ if rw then Just _globalDir else Nothing
 
 userDir :: IO FilePath
