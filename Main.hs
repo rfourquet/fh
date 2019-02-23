@@ -18,7 +18,7 @@ import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust)
 import           Data.Set              (Set)
 import qualified Data.Set              as Set
 import           Data.Time.Clock.POSIX
-import           Data.Word             (Word32, Word8)
+import           Data.Word             (Word8)
 import           Numeric               (readHex, showHex)
 import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, execParser,
                                         flag', footer, fullDesc, help, helper, info, long, many,
@@ -35,7 +35,7 @@ import           System.Posix.Files    (FileStatus, deviceID, directoryMode, fil
                                         isDirectory, isRegularFile, isSymbolicLink,
                                         modificationTimeHiRes, readSymbolicLink,
                                         statusChangeTimeHiRes)
-import           System.Posix.Types    (DeviceID, FileID)
+import           System.Posix.Types    (DeviceID, FileID, FileMode)
 import           Text.Printf           (printf)
 
 import           DB
@@ -207,7 +207,7 @@ mkTranslitEncoding h =
 -- * Entry
 
 data Entry = Entry { _path   :: FilePath
-                   , _mode   :: Word32
+                   , _mode   :: FileMode
                    , _sizeOK :: Bool -- size and du are reliable
                    , _size   :: Int
                    , _du     :: Int
@@ -305,7 +305,7 @@ mkEntry' opt db seen path status now'
           where newent' = return . Just $ Entry path mode True s d n (if B.null h then Nothing else Just h)
   | otherwise = return . Just . Entry path mode True size du 0 . Just $ B.pack $ replicate 20 0
   where dev    = deviceID status
-        mode   = fromIntegral $ fileMode status
+        mode   = fileMode status
         cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
         now    = ceiling $ 10^(9::Int) * now'
         size   = fromIntegral $ fileSize status
@@ -314,7 +314,7 @@ mkEntry' opt db seen path status now'
 
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
-combine :: (String, Word32, Bool, Int, Int) -> [Entry] -> Entry
+combine :: (String, FileMode, Bool, Int, Int) -> [Entry] -> Entry
 combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d0, 0, pure dirCtx) entries
   where update (ok, s, d, n, ctx) (Entry p m ok' size du cnt hash) =
           (ok && ok', s+size, d+du, n+cnt, SHA1.update <$> ctx <*>
@@ -328,7 +328,7 @@ combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d
 
 
 isDir :: Entry -> Bool
-isDir e = directoryMode == intersectFileModes directoryMode (fromIntegral $ _mode e)
+isDir e = directoryMode == intersectFileModes directoryMode (_mode e)
 
 -- * Key
 
