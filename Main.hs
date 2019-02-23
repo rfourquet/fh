@@ -63,6 +63,7 @@ data Options = Options { _optSHA1   :: Bool
                        , _optSort   :: Bool
                        , optSortCnt :: Bool
                        , optNoGit   :: Bool
+                       , optInitDB  :: Bool
                        , _optPaths  :: [FilePath]
                        }
 
@@ -135,7 +136,9 @@ parserOptions = Options
                             help "sort output, according to count")
                 <*> switch (long "ignore-git" <> short 'G' <>
                             help "ignore \".git\" filenames passed on the command line")
+                <*> switch (long "init-db" <> help "create a global DB directory in /var/cache and exit")
                 <*> many (argument str (metavar "PATHS..." <> help "files or directories (default: \".\")"))
+
 
 options :: ParserInfo Options
 options = info (helper <*> parserOptions)
@@ -171,31 +174,34 @@ main = do
   mapM_ mkTranslitEncoding [stdout, stderr, stdin]
 
   opt <- execParser options
-  seen <- newIORef Set.empty
-  bracket newDB closeDB $ \db -> do
-    when (_optHID opt > 1) $ resetHID db
+  if optInitDB opt
+    then createDBDirectory
+    else do
+      seen <- newIORef Set.empty
+      bracket newDB closeDB $ \db -> do
+        when (_optHID opt > 1) $ resetHID db
 
-    let printEntry ent = do
-          hid <- if optHID opt
-                   then sequence $ getHID db <$> _hash ent
-                   else return Nothing
-          putStrLn . showEntry opt hid $ ent
+        let printEntry ent = do
+              hid <- if optHID opt
+                       then sequence $ getHID db <$> _hash ent
+                       else return Nothing
+              putStrLn . showEntry opt hid $ ent
 
-    let list' = S.each (optPaths opt)
-              & S.mapM (mkEntry opt db False seen)
-              & S.catMaybes
-              & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
-                                  optMinCnt opt <= _cnt ent)
+        let list' = S.each (optPaths opt)
+                  & S.mapM (mkEntry opt db False seen)
+                  & S.catMaybes
+                  & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
+                                      optMinCnt opt <= _cnt ent)
 
-    list <- S.toList_ $ if optSort opt || optSortCnt opt
-                          then list'
-                          else S.chain printEntry list'
+        list <- S.toList_ $ if optSort opt || optSortCnt opt
+                              then list'
+                              else S.chain printEntry list'
 
-    when (optSort opt)    $ forM_ (sortOn _size list) printEntry
-    when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
-    when (optTotal opt) $
-      printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0, 0)
-                           (sortOn (takeFileName . _path) list)
+        when (optSort opt)    $ forM_ (sortOn _size list) printEntry
+        when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
+        when (optTotal opt) $
+          printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0, 0)
+                               (sortOn (takeFileName . _path) list)
 
 
 mkTranslitEncoding :: Handle -> IO ()

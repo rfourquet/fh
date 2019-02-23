@@ -1,17 +1,21 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module DB (DB, DBEntry, DBKey, closeDB, getDB, getHID, getTarget, insertDB, newDB, resetHID, updateDB) where
+module DB (DB, DBEntry, DBKey, closeDB, createDBDirectory, getDB,
+           getHID, getTarget, insertDB, newDB, resetHID, updateDB) where
 
 import           Control.Monad      (join, mapM_, (>=>))
 import qualified Data.ByteString    as BS
 import           Data.Int           (Int64)
 import           Data.IORef
 import           Data.List          (find)
-import           Data.Maybe         (isJust)
+import           Data.Maybe         (fromMaybe, isJust)
 import           Data.String        (fromString)
 import           Database.SQLite3   (ColumnType (..), Database, SQLData (..), Statement,
                                      StepResult (..), bind, bindBlob, bindInt64, close, exec,
                                      finalize, open, prepare, reset, step, typedColumns)
+import           System.Directory   (XdgDirectory (XdgCache), createDirectoryIfMissing,
+                                     doesDirectoryExist, getPermissions, getXdgDirectory, readable,
+                                     writable)
 import           System.FilePath    ((<.>), (</>))
 import           System.Posix.Types (DeviceID)
 
@@ -61,8 +65,32 @@ getHID db hash = join $ flip getHID' hash <$> getM db
 resetHID :: DB -> IO ()
 resetHID = getM >=> resetHID'
 
+createDBDirectory :: IO ()
+createDBDirectory = do
+  createDirectoryIfMissing False _globalDir
+  putStrLn $ "created directory \"" ++ _globalDir ++ "\" (will be used when readable & writable)"
+
 
 -- * internal
+
+_globalDir :: FilePath
+_globalDir = "/var/cache/fh-" ++ fhID
+
+globalDir :: IO (Maybe FilePath)
+globalDir = do
+  e <- doesDirectoryExist _globalDir
+  rw <- if e
+          then do p <- getPermissions _globalDir
+                  return $ readable p && writable p
+          else return False
+  return $ if rw then Just _globalDir else Nothing
+
+userDir :: IO FilePath
+userDir = do
+  dir <- getXdgDirectory XdgCache ("fh-" ++ fhID)
+  createDirectoryIfMissing True dir
+  return dir
+
 
 -- ** DB'
 
@@ -82,11 +110,11 @@ setDB (DB mps dbR _) dev = do
     Nothing -> setnew
     Just db' | dev == _dev db' -> return $ Just db'
              | otherwise       -> close' db' >> setnew
-    where setnew =
+    where setnew = do
+            dir <- fromMaybe <$> userDir <*> globalDir
             case do mp <- find ((== dev) . Mnt.devid) mps
                     uuid <- Mnt.uuid mp :: Maybe String
-                    let dir    = "/var/cache/fh-" ++ fhID
-                        path   = dir </> uuid <.> "v" ++ show version <.> "db"
+                    let path   = dir </> uuid <.> "v" ++ show version <.> "db"
                         hasIno = Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
                     return (path, if hasIno then Nothing else Just $ Mnt.target mp)
               of Nothing -> return Nothing
