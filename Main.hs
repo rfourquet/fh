@@ -207,7 +207,7 @@ main = do
 
            let printEntry ent = do
                  hid <- if optHID opt
-                          then sequence $ getHID db <$> _hash ent
+                          then sequence $ getHID' db <$> _hash ent
                           else return Nothing
                  putStrLn . showEntry opt hid $ ent
 
@@ -499,3 +499,10 @@ getAnnexHash path =
        | backend `elem` ["SHA1", "SHA1E"] && head s == 's' && length hex == 40 -> unhexlify hex
        | otherwise -> Nothing
      _ -> Nothing
+
+-- use #0 and #-1 resp. for empty files and directories
+getHID' :: DB -> ByteString -> IO Int64
+getHID' db hash
+  | hash == SHA1.finalize SHA1.init = return 0
+  | hash == SHA1.finalize dirCtx    = return (-1)
+  | otherwise                       = getHID db hash
