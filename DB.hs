@@ -145,16 +145,16 @@ setDB (DB mps dbR _) dev = do
     where setnew = do
             let mp' = find ((== dev) . Mnt.devid) mps
             dir <- fromMaybe <$> userDir <*> globalDir mp' dev
-            case do mp <- mp'
-                    uuid <- Mnt.uuid mp :: Maybe String
-                    let path   = dir </> uuid <.> "v" ++ show version <.> "db"
-                        hasIno = Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
-                    return (path, if hasIno then Nothing else Just $ Mnt.target mp)
-              of Nothing -> return Nothing
-                 Just (path, target) -> do
-                   db'' <- open' dev target path
-                   writeIORef dbR $ Just db''
-                   return $ Just db''
+            db'' <-
+              case do mp <- mp'
+                      uuid <- Mnt.uuid mp :: Maybe String
+                      let path   = dir </> uuid <.> "v" ++ show version <.> "db"
+                          hasIno = Mnt.fstype mp `elem` ["ext2", "ext3", "ext4"]
+                      return (path, if hasIno then Nothing else Just $ Mnt.target mp)
+              of Nothing             -> return Nothing
+                 Just (path, target) -> Just <$> open' dev target path
+            writeIORef dbR db''
+            return db''
 
 open' :: DeviceID -> Maybe FilePath -> FilePath -> IO DB'
 open' dev target path = do
