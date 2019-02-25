@@ -14,7 +14,7 @@ import           Data.Char             (ord)
 import           Data.Function         ((&))
 import           Data.Int              (Int64)
 import           Data.IORef
-import           Data.List             (find, foldl', isInfixOf, sort, sortOn)
+import           Data.List             (find, foldl', isInfixOf, sortOn)
 import           Data.List.Split       (chunksOf, splitOn)
 import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust)
 import           Data.Set              (Set)
@@ -225,8 +225,7 @@ main = do
            when (optSortD opt)   $ forM_ (sortOn _du   list) printEntry
            when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
            when (optTotal opt) $
-             printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0, 0)
-                                  (sortOn (takeFileName . _path) list)
+             printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0) list
 
 
 mkTranslitEncoding :: Handle -> IO ()
@@ -317,8 +316,8 @@ mkEntry' opt db seen path status now'
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    return . Just $ Entry path mode False size du 0 Nothing
               Right files -> do
-                entries <- sequence $ mkEntry opt db False seen . (path </>) <$> sort files :: IO [Maybe Entry]
-                let dir = combine (path, mode, True, size, du) $ catMaybes entries
+                entries <- sequence $ mkEntry opt db False seen . (path </>) <$> files :: IO [Maybe Entry]
+                let dir = combine (path, mode, True, du) $ catMaybes entries
                 when (_sizeOK dir) $
                   -- if the above condition is true, a read error occured somewhere and the info
                   -- can't reliably be stored into the DB
@@ -345,11 +344,12 @@ mkEntry' opt db seen path status now'
 
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
-combine :: (String, FileMode, Bool, Int, Int) -> [Entry] -> Entry
-combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d0, 0, pure dirCtx) entries
-  where update (ok, s, d, n, ctx) (Entry p m ok' size du cnt hash) =
-          (ok && ok', s+size, d+du, n+cnt, SHA1.update <$> ctx <*>
-              fmap B.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack $ takeFileName p, Just $ B.singleton 0]))
+combine :: (String, FileMode, Bool, Int) -> [Entry] -> Entry
+combine (name, mode, ok0, d0) entries = finalize $ foldl' update (ok0, 0, d0, 0, pure dirCtx) entries'
+  where entries' = sortOn _path [ e { _path = takeFileName $ _path e } | e <- entries ]
+        update (ok, s, d, n, ctx) (Entry p m ok' size du cnt hash) =
+          (ok && ok', s + dirEntrySize p size, d+du, n+cnt, SHA1.update <$> ctx <*>
+              fmap B.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack p, Just $ B.singleton 0]))
               -- The mode of a file has no effect on its hash, only on its containing dir's hash;
               -- this is similar to how git does.
               -- We add '\0' (`singleton 0`) to be sure that 2 unequal dirs won't have the same hash;
@@ -357,9 +357,21 @@ combine (name, mode, ok0, s0, d0) entries = finalize $ foldl' update (ok0, s0, d
         finalize (ok, s, d, n, ctx) = Entry name mode ok s d n $ SHA1.finalize <$> ctx
         pack32 m = B.pack $ fromIntegral <$> [m, m `shiftR` 8, m `shiftR` 16, m `shiftR` 24]
 
+-- arbitrary way to compute size for directories
+-- + we don't use what is reported by `fileSize status` as this is not consistent
+--   accross file systems
+-- + an empty dir has null size as this is useful to easily spot
+-- + the default reports only the sum of the sizes of contained files
+dirEntrySize :: FilePath -> Int -> Int
+dirEntrySize _ s = s
+
+-- possibe alternative with an option
+-- dirEntrySize p s = s + 2 * length p + 64 -- 64 is arbitrary "size overhead" for each entry
+
 
 isDir :: Entry -> Bool
 isDir e = directoryMode == intersectFileModes directoryMode (_mode e)
+
 
 -- * Key
 
