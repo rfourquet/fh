@@ -5,7 +5,7 @@ module Main where
 import           Control.Exception     (IOException, bracket, try)
 import           Control.Monad         (forM_, unless, when)
 import qualified Crypto.Hash.SHA1      as SHA1
-import           Data.Bits             (shiftL, shiftR, (.&.), (.|.))
+import           Data.Bits             (complement, shiftL, shiftR, (.&.), (.|.))
 import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as Char8
@@ -32,10 +32,10 @@ import           System.FilePath       (makeRelative, takeBaseName, takeDirector
                                         (</>))
 import           System.IO             (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
                                         mkTextEncoding, stderr, stdin, stdout)
-import           System.Posix.Files    (FileStatus, deviceID, directoryMode, fileID, fileMode,
-                                        fileSize, getSymbolicLinkStatus, intersectFileModes,
-                                        isDirectory, isRegularFile, isSymbolicLink,
-                                        modificationTimeHiRes, readSymbolicLink,
+import           System.Posix.Files    (FileStatus, accessModes, deviceID, directoryMode, fileID,
+                                        fileMode, fileSize, getSymbolicLinkStatus,
+                                        intersectFileModes, isDirectory, isRegularFile,
+                                        isSymbolicLink, modificationTimeHiRes, readSymbolicLink,
                                         statusChangeTimeHiRes)
 import           System.Posix.Types    (DeviceID, FileID, FileMode)
 import           Text.Printf           (printf)
@@ -46,29 +46,31 @@ import           Stat                  (fileBlockSize)
 
 -- * Options
 
-data Options = Options { optHelp    :: Bool
-                       , _optSHA1   :: Bool
-                       , _optHID    :: Int
-                       , _optSize   :: Bool
-                       , optDU      :: Bool
-                       , optCnt     :: Bool
-                       , optTotal   :: Bool
+data Options = Options { optHelp     :: Bool
 
-                       , _optCLevel :: CacheLevel
-                       , optMtime   :: Bool
-                       , optSLink   :: Bool
-                       , optALink   :: Bool
-                       , optUnique  :: Bool
-                       , optATrust  :: Bool
-                       , optSI      :: Bool
-                       , optMinSize :: Int
-                       , optMinCnt  :: Int
-                       , _optSortS  :: Bool
-                       , _optSortD  :: Bool
-                       , optSortCnt :: Bool
-                       , optNoGit   :: Bool
-                       , optInitDB  :: FilePath
-                       , _optPaths  :: [FilePath]
+                       , _optSHA1    :: Bool
+                       , _optHID     :: Int
+                       , _optSize    :: Bool
+                       , optDU       :: Bool
+                       , optCnt      :: Bool
+                       , optTotal    :: Bool
+
+                       , _optCLevel  :: CacheLevel
+                       , optMtime    :: Bool
+                       , optSLink    :: Bool
+                       , optALink    :: Bool
+                       , optUnique   :: Bool
+                       , optATrust   :: Bool
+                       , optUseModes :: Bool
+                       , optSI       :: Bool
+                       , optMinSize  :: Int
+                       , optMinCnt   :: Int
+                       , _optSortS   :: Bool
+                       , _optSortD   :: Bool
+                       , optSortCnt  :: Bool
+                       , optNoGit    :: Bool
+                       , optInitDB   :: FilePath
+                       , _optPaths   :: [FilePath]
                        }
 
 optOutUnspecified :: Options -> Bool
@@ -130,6 +132,8 @@ parserOptions = Options
                             help "discard files which have already been accounted for")
                 <*> switch (long "trust-annex" <> short 'X' <>
                             help "trust the SHA1 hash encoded in a git-annex file name")
+                <*> switch (long "use-modes" <> short 'M' <>
+                            help "use file modes to compute the hash of directories")
                 <*> switch (long "si" <> short 't' <>
                             help "use powers of 1000 instead of 1024 for sizes")
                 <*> option auto (long "minsize" <> short 'z' <> value 0 <> metavar "INT" <>
@@ -335,7 +339,7 @@ mkEntry' opt db seen path status now'
           where newent' = return . Just $ Entry path mode True s d n (if B.null h then Nothing else Just h)
   | otherwise = return . Just . Entry path mode True size du 0 . Just $ B.pack $ replicate 20 0
   where dev    = deviceID status
-        mode   = fileMode status
+        mode   = if optUseModes opt then fileMode status else fileMode status .&. complement accessModes
         cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
         now    = ceiling $ 10^(9::Int) * now'
         size   = fromIntegral $ fileSize status
@@ -378,13 +382,14 @@ isDir e = directoryMode == intersectFileModes directoryMode (_mode e)
 data Key = Inode DBKey | PathHash DBKey ByteString
 
 
-highBit, highBit', highBit'' :: DBKey
-highBit   = 1 `shiftL` 63
-highBit'  = 1 `shiftL` 62
-highBit'' = 1 `shiftL` 61
+highBit, highBit', highBit'', highBit''' :: DBKey
+highBit    = 1 `shiftL` 63
+highBit'   = 1 `shiftL` 62
+highBit''  = 1 `shiftL` 61
+highBit''' = 1 `shiftL` 60
 
-mask61 :: DBKey -> DBKey
-mask61 = (.&. (highBit'' - 1))
+mask60 :: DBKey -> DBKey
+mask60 = (.&. (highBit''' - 1))
 
 -- the three high bits of the DBKey part of the Key for directories
 -- encode whether symbolic links are followed, git-annex links are
@@ -395,19 +400,20 @@ mkKey opt db status path = do
   case target' of
     Nothing ->
       let ino = fromIntegral . fileID $ status :: DBKey
-      in if mask61 ino == ino
+      in if mask60 ino == ino
            then return $ Inode $ bits .|. ino
            else error "unexpected inode number"
     Just target -> do
       realpath <- canonicalizePath path
       let hash = SHA1.hash . fromRawString $ makeRelative target realpath
           ws   = fromIntegral <$> B.unpack hash :: [DBKey]
-          h64  = mask61 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
+          h64  = mask60 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
       return $ PathHash (bits .|. h64) hash
-  where bit   = if optSLink  opt && isDirectory status then highBit   else 0
-        bit'  = if optALink  opt && isDirectory status then highBit'  else 0
-        bit'' = if optUnique opt && isDirectory status then highBit'' else 0
-        bits  = bit .|. bit' .|. bit''
+  where bit    = if optSLink    opt && isDirectory status then highBit    else 0
+        bit'   = if optALink    opt && isDirectory status then highBit'   else 0
+        bit''  = if optUnique   opt && isDirectory status then highBit''  else 0
+        bit''' = if optUseModes opt && isDirectory status then highBit''' else 0
+        bits  = bit .|. bit' .|. bit'' .|. bit'''
 
 fromKey :: Key -> DBKey
 fromKey (Inode k)      = k
