@@ -17,7 +17,7 @@ import           Data.Int                  (Int64)
 import           Data.IORef
 import           Data.List                 (find, foldl', isInfixOf, sort, sortOn)
 import           Data.List.Split           (chunksOf, splitOn)
-import           Data.Maybe                (catMaybes, fromJust, fromMaybe, isJust)
+import           Data.Maybe                (catMaybes, fromJust, fromMaybe, isJust, isNothing)
 import           Data.Set                  (Set)
 import qualified Data.Set                  as Set
 import           Data.Time.Clock.POSIX
@@ -25,14 +25,15 @@ import           Data.Word                 (Word8)
 import           Numeric                   (readHex, showHex)
 import           Options.Applicative       (Parser, ParserInfo, ReadM, argument, auto, columns,
                                             customExecParser, flag', fullDesc, help, helper, info,
-                                            long, many, metavar, option, prefs, progDesc,
+                                            long, many, metavar, option, optional, prefs, progDesc,
                                             readerError, short, str, strOption, switch, value)
 import qualified Streaming.Prelude         as S
 import           System.Directory          (canonicalizePath, listDirectory)
 import           System.FilePath           (makeRelative, takeBaseName, takeDirectory, takeFileName,
                                             (</>))
-import           System.IO                 (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
-                                            mkTextEncoding, stderr, stdin, stdout)
+import           System.IO                 (Handle, getContents, hGetEncoding, hPutStrLn,
+                                            hSetEncoding, mkTextEncoding, readFile, stderr, stdin,
+                                            stdout)
 import           System.Posix.Files        (FileStatus, accessModes, deviceID, directoryMode,
                                             fileID, fileMode, fileSize, getSymbolicLinkStatus,
                                             intersectFileModes, isDirectory, isRegularFile,
@@ -72,7 +73,8 @@ data Options = Options { optHelp     :: Bool
                        , optSortCnt  :: Bool
                        , optNoGit    :: Bool
                        , optInitDB   :: FilePath
-                       , _optPaths   :: [FilePath]
+                       , optInput    :: Maybe FilePath  -- file containing paths to report
+                       , optPaths    :: [FilePath]
                        }
 
 optOutUnspecified :: Options -> Bool
@@ -93,10 +95,6 @@ optSize opt = optOutUnspecified opt || _optSize opt
 optSortS, optSortD :: Options -> Bool
 optSortS opt = _optSortS opt && not (optSortCnt opt || _optSortD opt)
 optSortD opt = _optSortD opt && not (optSortCnt opt)
-
-optPaths :: Options -> [FilePath]
-optPaths opt | null (_optPaths opt) = ["."]
-             | otherwise            = _optPaths opt
 
 optCLevel :: Options -> CacheLevel
 optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
@@ -154,6 +152,8 @@ parserOptions = Options
                             help "ignore \".git\" filenames passed on the command line")
                 <*> strOption (long "init-db" <> metavar "PATH" <> value "" <>
                                help "create a DB directory at PATH and exit")
+                <*> optional (strOption (long "files-from" <> short 'I' <> metavar "FILE" <>
+                                         help "a file containing paths to work on (\"-\" for stdin)"))
                 <*> many (argument str (metavar "PATHS..." <> help "files or directories (default: \".\")"))
 
 
@@ -240,7 +240,11 @@ main = do
 
 -- recursively yield paths within directories up to a fixed depth
 optPaths' :: Options -> S.Stream (S.Of (FilePath, FileStatus)) IO ()
-optPaths' opt = S.for (S.each $ optPaths opt) $ recStatus $ optDepth opt
+optPaths' opt = do
+    input <- flip (maybe (return [])) (optInput opt) $ \file ->
+               lines <$> lift (if file == "-" then getContents else readFile file)
+    let paths = if isNothing (optInput opt) && null (optPaths opt) then ["."] else optPaths opt
+    S.for (S.each $ input ++ paths) $ recStatus $ optDepth opt
   where
     recStatus :: Int -> FilePath -> S.Stream (S.Of (FilePath, FileStatus)) IO ()
     recStatus depth path =
