@@ -31,7 +31,7 @@ import qualified Streaming.Prelude     as S
 import           System.Directory      (canonicalizePath, listDirectory)
 import           System.FilePath       (makeRelative, takeBaseName, takeDirectory, takeFileName,
                                         (</>))
-import           System.IO             (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
+import           System.IO             (Handle, hGetEncoding, hPutStrLn, hSetEncoding, getContents,
                                         mkTextEncoding, stderr, stdin, stdout)
 import           System.Posix.Files    (FileStatus, accessModes, deviceID, directoryMode, fileID,
                                         fileMode, fileSize, getSymbolicLinkStatus,
@@ -72,7 +72,7 @@ data Options = Options { optHelp     :: Bool
                        , optSortCnt  :: Bool
                        , optNoGit    :: Bool
                        , optInitDB   :: FilePath
-                       , _optPaths   :: [FilePath]
+                       , optPaths   :: [FilePath]
                        }
 
 optOutUnspecified :: Options -> Bool
@@ -93,10 +93,6 @@ optSize opt = optOutUnspecified opt || _optSize opt
 optSortS, optSortD :: Options -> Bool
 optSortS opt = _optSortS opt && not (optSortCnt opt || _optSortD opt)
 optSortD opt = _optSortD opt && not (optSortCnt opt)
-
-optPaths :: Options -> [FilePath]
-optPaths opt | null (_optPaths opt) = ["."]
-             | otherwise            = _optPaths opt
 
 optCLevel :: Options -> CacheLevel
 optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
@@ -238,7 +234,10 @@ main = do
 
 
 optPaths' :: Options -> S.Stream (S.Of (FilePath, FileStatus)) IO ()
-optPaths' opt = S.for (S.each $ optPaths opt) $ recStatus $ optDepth opt
+optPaths' opt = do
+    input <- lines <$> lift getContents
+    let paths = if null input && null (optPaths opt) then ["."] else optPaths opt
+    S.for (S.each $ input ++ paths) $ recStatus $ optDepth opt
   where
     recStatus :: Int -> FilePath -> S.Stream (S.Of (FilePath, FileStatus)) IO ()
     recStatus depth path =
