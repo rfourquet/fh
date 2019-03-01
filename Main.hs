@@ -2,6 +2,7 @@
 
 module Main where
 
+import Control.Monad.Trans.Class (lift)
 import           Control.Exception     (IOException, bracket, try)
 import           Control.Monad         (forM_, unless, when)
 import qualified Crypto.Hash.SHA1      as SHA1
@@ -14,7 +15,7 @@ import           Data.Char             (ord)
 import           Data.Function         ((&))
 import           Data.Int              (Int64)
 import           Data.IORef
-import           Data.List             (find, foldl', isInfixOf, sortOn)
+import           Data.List             (find, foldl', isInfixOf, sortOn, sort)
 import           Data.List.Split       (chunksOf, splitOn)
 import           Data.Maybe            (catMaybes, fromJust, fromMaybe, isJust)
 import           Data.Set              (Set)
@@ -22,7 +23,7 @@ import qualified Data.Set              as Set
 import           Data.Time.Clock.POSIX
 import           Data.Word             (Word8)
 import           Numeric               (readHex, showHex)
-import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, columns,
+import           Options.Applicative   (Parser, ParserInfo, ReadM, argument, auto, columns, showDefault,
                                         customExecParser, flag', fullDesc, help, helper, info, long,
                                         many, metavar, option, prefs, progDesc, readerError, short,
                                         str, strOption, switch, value)
@@ -55,6 +56,7 @@ data Options = Options { optHelp     :: Bool
                        , optCnt      :: Bool
                        , optTotal    :: Bool
 
+                       , optDepth    :: Int
                        , _optCLevel  :: CacheLevel
                        , optMtime    :: Bool
                        , optSLink    :: Bool
@@ -94,7 +96,6 @@ optSortD opt = _optSortD opt && not (optSortCnt opt)
 
 optPaths :: Options -> [FilePath]
 optPaths opt | null (_optPaths opt) = ["."]
-             | optNoGit opt         = filter ((/= ".git") . takeFileName) $ _optPaths opt
              | otherwise            = _optPaths opt
 
 optCLevel :: Options -> CacheLevel
@@ -120,6 +121,8 @@ parserOptions = Options
                 <*> switch (long "total" <> short 'c' <>
                             help "produce a grand total")
 
+                <*> option auto (long "depth" <> short 'R' <> value 0 <> showDefault <> metavar "INT" <>
+                                 help "report entries recursively up to depth INT")
                 <*> option clevel (long "cache-level" <> short 'l' <> value (-1) <> metavar "INT" <>
                                    help "policy for cache use, in 0..3 (default: 1 or 2)")
                 <*> switch (long "mtime" <> short 'm' <>
@@ -215,11 +218,13 @@ main = do
                           else return Nothing
                  putStrLn . showEntry opt hid $ ent
 
-           let list' = S.each (optPaths opt)
-                     & S.mapM (mkEntry opt db False seen)
+           let list' = optPaths' opt
+                     & S.filter (if optNoGit opt then ((/= ".git") . takeFileName . fst) else const True)
+                     & S.mapM (uncurry $ mkEntry' opt db seen)
                      & S.catMaybes
                      & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
                                          optMinCnt opt <= _cnt ent)
+
 
            list <- S.toList_ $ if optSortS opt || optSortD opt || optSortCnt opt
                                  then list'
@@ -231,6 +236,23 @@ main = do
            when (optTotal opt) $
              printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0) list
 
+
+optPaths' :: Options -> S.Stream (S.Of (FilePath, FileStatus)) IO ()
+optPaths' opt = S.for (S.each $ optPaths opt) $ recStatus $ optDepth opt
+  where
+    recStatus :: Int -> FilePath -> S.Stream (S.Of (FilePath, FileStatus)) IO ()
+    recStatus depth path =
+        unless (optNoGit opt && takeFileName path == ".git") $ do
+          status' <- lift $ getStatus path False
+          flip (maybe $ S.each []) status' $ \status -> do
+            when (depth > 0 && isDirectory status) $
+              do
+                 files' <- lift $ (try (listDirectory path) :: IO (Either IOException [FilePath]))
+                 case files' of
+                   Left _ -> S.each []
+                   Right files ->
+                     S.for (S.each (sort files))  (\p -> recStatus (depth-1) $ path </> p)
+            S.yield (path, status)
 
 mkTranslitEncoding :: Handle -> IO ()
 mkTranslitEncoding h =
@@ -250,27 +272,37 @@ data Entry = Entry { _path   :: FilePath
                    } deriving (Show)
 
 
-mkEntry  :: Options -> DB -> Bool -> IORef (Set (DeviceID, FileID)) -> FilePath -> IO (Maybe Entry)
-mkEntry opt db quiet seen path = do
+getStatus :: FilePath -> Bool -> IO (Maybe FileStatus)
+getStatus path quiet = do
   status' <- try (getSymbolicLinkStatus path) :: IO (Either IOException FileStatus)
-  now' <- getPOSIXTime
   case status' of
     Left exception -> do unless quiet $ hPutStrLn stderr $ "error: " ++ show exception
                          return Nothing
-    Right status -> do
-        seen' <- if optUnique opt
-                   then readIORef seen
-                   else return Set.empty
-        let devino = (deviceID status, fileID status)
-        if optUnique opt && Set.member devino seen'
-          then return Nothing
-          else do writeIORef seen $ Set.insert devino seen'
-                  mkEntry' opt db seen path status now'
+    Right status -> return $ Just status
 
-mkEntry' :: Options -> DB -> IORef (Set (DeviceID, FileID))
-         -> FilePath -> FileStatus -> POSIXTime
-         -> IO (Maybe Entry)
-mkEntry' opt db seen path status now'
+mkEntry :: Options -> DB -> Bool -> IORef (Set (DeviceID, FileID)) -> FilePath -> IO (Maybe Entry)
+mkEntry opt db quiet seen path = do
+  status' <- getStatus path quiet
+  case status' of
+    Nothing -> return Nothing
+    Just status -> mkEntry' opt db seen path status
+
+mkEntry' :: Options -> DB -> IORef (Set (DeviceID, FileID)) -> FilePath -> FileStatus -> IO (Maybe Entry)
+mkEntry' opt db seen path status = do
+  now' <- getPOSIXTime
+  seen' <- if optUnique opt
+             then readIORef seen
+             else return Set.empty
+  let devino = (deviceID status, fileID status)
+  if optUnique opt && Set.member devino seen'
+    then return Nothing
+    else do writeIORef seen $ Set.insert devino seen'
+            mkEntry'' opt db seen path status now'
+
+mkEntry'' :: Options -> DB -> IORef (Set (DeviceID, FileID))
+          -> FilePath -> FileStatus -> POSIXTime
+          -> IO (Maybe Entry)
+mkEntry'' opt db seen path status now'
   | isRegularFile status = do
       let newent' = return . Just . Entry path mode True size du 1
           newent put key = do
