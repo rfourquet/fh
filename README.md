@@ -28,11 +28,11 @@ This is the help message:
 
 ```
 Usage: fh [-?|--long-help] [-x|--sha1] [-#|--hid] [-s|--size] [-d|--disk-usage]
-          [-n|--count] [-c|--total] [-l|--cache-level INT] [-m|--mtime]
-          [-L|--dereference] [-A|--deref-annex] [-u|--unique]
-          [-X|--trust-annex] [-t|--si] [-z|--minsize INT] [-k|--mincount INT]
-          [-S|--sort] [-D|--sort-du] [-N|--sort-count] [-G|--ignore-git]
-          [--init-db PATH] [PATHS...]
+          [-n|--count] [-c|--total] [-R|--depth INT] [-l|--cache-level INT]
+          [-m|--mtime] [-L|--dereference] [-A|--deref-annex] [-u|--unique]
+          [-X|--trust-annex] [-M|--use-modes] [-t|--si] [-z|--minsize INT]
+          [-k|--mincount INT] [-S|--sort] [-D|--sort-du] [-N|--sort-count]
+          [-G|--ignore-git] [--init-db PATH] [-I|--files-from FILE] [PATHS...]
   compute and cache the sha1 hash and size of files and directories
 
 Available options:
@@ -45,6 +45,7 @@ Available options:
   -d,--disk-usage          print actual size (disk usage) (EXPERIMENTAL)
   -n,--count               print number of (recursively) contained files
   -c,--total               produce a grand total
+  -R,--depth INT           report entries recursively up to depth INT
   -l,--cache-level INT     policy for cache use, in 0..3 (default: 1 or 2)
   -m,--mtime               use mtime instead of ctime to interpret cache level
   -L,--dereference         dereference all symbolic links
@@ -60,6 +61,7 @@ Available options:
   -N,--sort-count          sort output, according to count
   -G,--ignore-git          ignore ".git" filenames passed on the command line
   --init-db PATH           create a DB directory at PATH and exit
+  -I,--files-from FILE     a file containing paths to work on ("-" for stdin)
   PATHS...                 files or directories (default: ".")
 ```
 
@@ -147,6 +149,41 @@ $ fh -#x DB*
    #2  9468ea7acbd21c9d0817bfa0a688678bf3e97f6b  DB2.hs
    #2  9468ea7acbd21c9d0817bfa0a688678bf3e97f6b  DB.hs
 ```
+
+## Specifying the paths
+
+The simplest way is to provide the paths on the command line. Programs
+like `xargs` and e.g. `find` will give quite some flexibility, but due
+to a current limitation of the code parsing the arguments, specifying
+too many paths arguments on the command line has some inefficiency.
+
+Moreover, there are some built-in limits as to how many arguments a
+command can have. Also, above a certain threshold, `xargs` will by
+default split the arguments and invoke the command repeatedly, which
+can have confusing results: for example when a sorting option is used, the
+result will appear to be sorted by chunks instead of globally.
+
+A solution is to use the `--file-from` option, in particular by specifying
+`-` as the file, to read the list of paths from `stdin`.
+Note that the `--ignore-git` option applies also to those files.
+
+For example:
+
+```
+$ cd /nix/store/aaa9* && find -depth -type d | fh -dnu -k1 -I-
+332.0k           (9)  ./share/doc/storable-record-0.0.4/html/src
+164.0k          (16)  ./share/doc/storable-record-0.0.4/html
+  8.0k           (1)  ./share/doc/storable-record-0.0.4
+```
+
+The `-depth` option makes `find` print a directory after its content
+has been printed; then the `-u` and `-k1` options of `fh` allow to
+filter out non-leaf directories for which all content has already been
+accounted for.
+
+The `--depth` option of `fh` also covers some use cases (with the
+`--ignore-git` option, ".git" directories _and_ their content are
+omitted from the list of generated paths).
 
 ## For git-annex users
 
