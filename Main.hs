@@ -6,7 +6,8 @@ import           Control.Exception         (IOException, bracket, try)
 import           Control.Monad             (forM_, join, unless, when)
 import           Control.Monad.Trans.Class (lift)
 import qualified Crypto.Hash.SHA1          as SHA1
-import           Data.Bits                 (complement, finiteBitSize, shiftL, shiftR, (.&.), (.|.))
+import           Data.Bits                 (bit, complement, finiteBitSize, setBit, shiftL, shiftR,
+                                            (.&.), (.|.))
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as B
 import qualified Data.ByteString.Char8     as Char8
@@ -370,7 +371,7 @@ mkEntry'' opt db now seen path status
                         else Nothing
       if | isJust annexSzHash -> do
              let Just (s, h) = annexSzHash
-                 key = read ("0x" ++ hexlify h) .|. (1 `shiftL` (finiteBitSize (0::FileID) - 1))
+                 key = read ("0x" ++ hexlify h) `setBit` (finiteBitSize (0::FileID) - 1)
                      -- we make sure the high bit is set to reduce risk of collisions
              continue <- updateSeen opt seen status $ Just key
              return $ if continue
@@ -460,19 +461,9 @@ isDir e = directoryMode == intersectFileModes directoryMode (_mode e)
 
 data Key = Inode DBKey | PathHash DBKey ByteString
 
-
-highBit, highBit', highBit'', highBit''' :: DBKey
-highBit    = 1 `shiftL` 63
-highBit'   = 1 `shiftL` 62
-highBit''  = 1 `shiftL` 61
-highBit''' = 1 `shiftL` 60
-
-mask60 :: DBKey -> DBKey
-mask60 = (.&. (highBit''' - 1))
-
--- the three high bits of the DBKey part of the Key for directories
+-- the four high bits of the DBKey part of the Key for directories
 -- encode whether symbolic links are followed, git-annex links are
--- followed, or only unique files are handled
+-- followed, only unique files are handled, or modes are used for hashes
 mkKey :: Options -> DB -> FileStatus -> FilePath -> IO Key
 mkKey opt db status path = do
   target' <- getTarget db $ deviceID status :: IO (Maybe FilePath)
@@ -488,11 +479,12 @@ mkKey opt db status path = do
           ws   = fromIntegral <$> B.unpack hash :: [DBKey]
           h64  = mask60 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
       return $ PathHash (bits .|. h64) hash
-  where bit    = if optSLink    opt && isDirectory status then highBit    else 0
-        bit'   = if optALink    opt && isDirectory status then highBit'   else 0
-        bit''  = if optUnique   opt && isDirectory status then highBit''  else 0
-        bit''' = if optUseModes opt && isDirectory status then highBit''' else 0
-        bits  = bit .|. bit' .|. bit'' .|. bit'''
+  where bits = if optSLink    opt && isDirectory status then bit 63 else 0
+           .|. if optALink    opt && isDirectory status then bit 62 else 0
+           .|. if optUnique   opt && isDirectory status then bit 61 else 0
+           .|. if optUseModes opt && isDirectory status then bit 60 else 0
+        mask60 :: DBKey -> DBKey
+        mask60 = (.&. (bit 60 - 1))
 
 fromKey :: Key -> DBKey
 fromKey (Inode k)      = k
