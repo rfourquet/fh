@@ -38,9 +38,10 @@ import           System.Posix.Files        (FileStatus, accessModes, deviceID, d
                                             fileID, fileMode, fileSize, getSymbolicLinkStatus,
                                             intersectFileModes, isDirectory, isRegularFile,
                                             isSymbolicLink, modificationTimeHiRes, readSymbolicLink,
-                                            statusChangeTimeHiRes)
+                                            regularFileMode, statusChangeTimeHiRes)
 import           System.Posix.Types        (DeviceID, FileID, FileMode)
 import           Text.Printf               (printf)
+import           Text.Read                 (readMaybe)
 
 import           DB
 import           Stat                      (fileBlockSize)
@@ -64,6 +65,7 @@ data Options = Options { optHelp     :: Bool
                        , optALink    :: Bool
                        , optUnique   :: Bool
                        , optATrust   :: Bool
+                       , optAPretend :: Bool
                        , optUseModes :: Bool
                        , optSI       :: Bool
                        , optMinSize  :: Int
@@ -98,9 +100,10 @@ optSortS opt = _optSortS opt && not (optSortCnt opt || _optSortD opt)
 optSortD opt = _optSortD opt && not (optSortCnt opt)
 
 optCLevel :: Options -> CacheLevel
-optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
-              | _optCLevel opt == -1                                    = 2
-              | otherwise                                               = _optCLevel opt
+optCLevel opt | _optCLevel opt == -1 &&
+                  (optSHA1' opt || optUnique opt || optAPretend opt) = 1
+              | _optCLevel opt == -1                                 = 2
+              | otherwise                                            = _optCLevel opt
 
 parserOptions :: Parser Options
 parserOptions = Options
@@ -134,6 +137,8 @@ parserOptions = Options
                             help "discard files which have already been accounted for")
                 <*> switch (long "trust-annex" <> short 'X' <>
                             help "trust the SHA1 hash encoded in a git-annex file name")
+                <*> switch (long "pretend-annex" <> short 'P' <>
+                            help "pretend original files replace git-annex symlinks")
                 <*> switch (long "use-modes" <> short 'M' <>
                             help "use file modes to compute the hash of directories")
                 <*> switch (long "si" <> short 't' <>
@@ -185,9 +190,9 @@ printHelp = putStrLn
   \ When the size of a file has changed since cached, the hash is unconditionally\n\
   \ re-computed (even when L = 3).                                               \n\
   \ The default value of L is                                                    \n\
-  \   * 1 when hashes are requested (should be reliable in most cases)           \n\
-  \       or when the unique option is active (it's otherwise easy to get        \n\
-  \       confusing results with L = 2), and                                     \n\
+  \   * 1 when hashes are requested (should be reliable in most cases),          \n\
+  \       or when the unique or pretend-annex options are active (it's otherwise \n\
+  \       easy to get confusing results with L = 2), and                         \n\
   \   * 2 when only the size is requested (this avoids to recursively traverse   \n\
   \       directories, which would then be no better than du).                   \n\
   \\n\
@@ -337,9 +342,9 @@ mkEntry'' opt db now seen path status
         -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
         -- we can as well avoid the getDB call in this case, as a small optimization
       then do
-        let annexHash = if optATrust opt then getAnnexHash path else Nothing
-        if isJust annexHash
-          then newent' annexHash
+        let annexSzHash = if optATrust opt then getAnnexSizeAndHash path else Nothing
+        if isJust annexSzHash
+          then newent' $ snd <$> annexSzHash
           else do
             key <- mkKey opt db status path
             entry_ <- getDB db dev $ fromKey key
@@ -355,17 +360,23 @@ mkEntry'' opt db now seen path status
       else newent' Nothing
   | isSymbolicLink status = do
       target <- readSymbolicLink path
-      if optSLink opt || optALink opt && ".git/annex/objects/" `isInfixOf` target
-      then do
-         ent <- mkEntry opt db now seen True (takeDirectory path </> target)
-         return $ flip fmap ent $ \e -> e { _path = path }
-      else
-        -- we compute hash conditionally as directories containing only symlinks will otherwise
-        -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
-        -- seems to make the matter worse (requiring then to make the hash field strict...)
-        return . Just . Entry path mode True size du 0 $
-          if optSHA1' opt then Just $ sha1sumSymlink target
-                          else Nothing
+      let annexSzHash = if optAPretend opt && ".git/annex/objects/" `isInfixOf` target
+                        then getAnnexSizeAndHash target
+                        else Nothing
+      if | isJust annexSzHash ->
+             let Just (s, h) = annexSzHash
+             in  return . Just . Entry path regularFileMode False s (guessDU s) 1 $
+                   if optSHA1' opt then Just h else Nothing
+         | optSLink opt || optALink opt && ".git/annex/objects/" `isInfixOf` target -> do
+             ent <- mkEntry opt db now seen True (takeDirectory path </> target)
+             return $ flip fmap ent $ \e -> e { _path = path }
+         | otherwise ->
+             -- we compute hash conditionally as directories containing only symlinks will otherwise
+             -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
+             -- seems to make the matter worse (requiring then to make the hash field strict...)
+             return . Just . Entry path mode True size du 0 $
+               if optSHA1' opt then Just $ sha1sumSymlink target
+                               else Nothing
   | isDirectory status = do
       key <- mkKey opt db status path
       let newent exists = do
@@ -403,7 +414,7 @@ mkEntry'' opt db now seen path status
         size   = fromIntegral $ fileSize status
         du     = fileBlockSize status * 512 -- TODO: check 512 is always valid
         cl     = optCLevel opt
-
+        guessDU s = 4096 * (1 + div (s-1) 4096)
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
 combine :: (String, FileMode, Bool, Int) -> [Entry] -> Entry
@@ -555,12 +566,13 @@ unhexlify h = let ws' = concatMap readHex $ chunksOf 2 h :: [(Word8, String)]
                   ws  = fst <$> ws'
               in if valid then Just $ B.pack ws else Nothing
 
-getAnnexHash :: String -> Maybe ByteString
-getAnnexHash path =
+getAnnexSizeAndHash :: String -> Maybe (Int, ByteString)
+getAnnexSizeAndHash path =
   let parts = splitOn "-" $ takeBaseName path
   in case parts of
-     [backend, s, "", hex]
-       | backend `elem` ["SHA1", "SHA1E"] && head s == 's' && length hex == 40 -> unhexlify hex
+     [backend, size, "", hex]
+       | backend `elem` ["SHA1", "SHA1E"] && head size == 's' && length hex == 40 ->
+           (,) <$> readMaybe (tail size) <*> unhexlify hex
        | otherwise -> Nothing
      _ -> Nothing
 
