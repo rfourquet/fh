@@ -34,8 +34,9 @@ version = 0
 
 type DBKey = Int64
 type DBTime = Int64
-data DB = DB [Mnt.Point] (IORef (Maybe DB')) (IORef (Maybe IDMap))
 type DBEntry = (DBKey, DBTime, Int, Int, Int, BS.ByteString, BS.ByteString)
+
+data DB = DB [Mnt.Point] (IORef (Maybe DB')) (IORef (Maybe IDMap))
 
 
 newDB :: IO DB
