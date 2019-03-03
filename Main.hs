@@ -72,6 +72,7 @@ data Options = Options { optHelp     :: Bool
                        , _optSortD   :: Bool
                        , optSortCnt  :: Bool
                        , optNoGit    :: Bool
+                       , optOptimS   :: Bool
                        , optInitDB   :: FilePath
                        , optInput    :: Maybe FilePath  -- file containing paths to report
                        , optPaths    :: [FilePath]
@@ -150,6 +151,8 @@ parserOptions = Options
                             help "sort output, according to count")
                 <*> switch (long "ignore-git" <> short 'G' <>
                             help "ignore \".git\" filenames passed on the command line")
+                <*> switch (long "optimize-space" <> short 'O' <>
+                            help "don't store in DB fast to compute entries")
                 <*> strOption (long "init-db" <> metavar "PATH" <> value "" <>
                                help "create a DB directory at PATH and exit")
                 <*> optional (strOption (long "files-from" <> short 'I' <> metavar "FILE" <>
@@ -370,7 +373,8 @@ mkEntry'' opt db now seen path status
                 when (_sizeOK dir) $
                   -- if the above condition is true, a read error occured somewhere and the info
                   -- can't reliably be stored into the DB
-                  put db dev $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe B.empty (_hash dir))
+                  unless (optOptimS opt && (null files || null (tail files))) $ -- don't store dirs of length <= 1
+                    put db dev $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe B.empty (_hash dir))
                 return . Just $ dir
       entry_ <- getDB db dev $ fromKey key
       case entry_ of
