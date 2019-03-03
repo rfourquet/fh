@@ -30,9 +30,10 @@ This is the help message:
 Usage: fh [-?|--long-help] [-x|--sha1] [-#|--hid] [-s|--size] [-d|--disk-usage]
           [-n|--count] [-c|--total] [-R|--depth INT] [-l|--cache-level INT]
           [-m|--mtime] [-L|--dereference] [-A|--deref-annex] [-u|--unique]
-          [-X|--trust-annex] [-M|--use-modes] [-t|--si] [-z|--minsize INT]
-          [-k|--mincount INT] [-S|--sort] [-D|--sort-du] [-N|--sort-count]
-          [-G|--ignore-git] [--init-db PATH] [-I|--files-from FILE] [PATHS...]
+          [-X|--trust-annex] [-P|--pretend-annex] [-M|--use-modes] [-t|--si]
+          [-z|--minsize INT] [-k|--mincount INT] [-S|--sort] [-D|--sort-du]
+          [-N|--sort-count] [-G|--ignore-git] [-O|--optimize-space]
+          [--init-db PATH] [-I|--files-from FILE] [PATHS...]
   compute and cache the sha1 hash and size of files and directories
 
 Available options:
@@ -52,6 +53,7 @@ Available options:
   -A,--deref-annex         dereference all git-annex symbolic links
   -u,--unique              discard files which have already been accounted for
   -X,--trust-annex         trust the SHA1 hash encoded in a git-annex file name
+  -P,--pretend-annex       pretend original files replace git-annex symlinks
   -M,--use-modes           use file modes to compute the hash of directories
   -t,--si                  use powers of 1000 instead of 1024 for sizes
   -z,--minsize INT         smallest size to show, in MiB
@@ -60,6 +62,7 @@ Available options:
   -D,--sort-du             sort output, according to disk usage
   -N,--sort-count          sort output, according to count
   -G,--ignore-git          ignore ".git" filenames passed on the command line
+  -O,--optimize-space      don't store in DB fast to compute entries
   --init-db PATH           create a DB directory at PATH and exit
   -I,--files-from FILE     a file containing paths to work on ("-" for stdin)
   PATHS...                 files or directories (default: ".")
@@ -190,12 +193,31 @@ omitted from the list of generated paths).
 "Annex'ed" directories are full of `git-annex` symbolic links, so the
 reported sizes are not very meaningful. Like with `du`, it's possible
 to use the `-L` option to follow symlinks, but there is a more
-specific option to follow only `git-annex` symlinks: `-A`. Also, as
-`git-annex` itself computes hashes, it can be wasteful for `fh` to
-recompute these when using SHA1, so there is an option to trust SHA1
-hashes computed by git-annex: `-X` (this must be used in combination
-with `-A` to be useful, unless `fh` is run directly against the
-`git-annex` store, at ".git/annex/objects/").
+specific option to follow only `git-annex` symlinks: `-A`.
+
+Also, as `git-annex` itself computes hashes, it can be wasteful for
+`fh` to recompute these when using SHA1, so there is an option to
+trust SHA1 hashes computed by git-annex: `-X` (this must be used in
+combination with `-A` to be useful, unless `fh` is run directly
+against the `git-annex` store, at ".git/annex/objects/").
+
+Finally, there is an option, `--pretend-annex`, to make `fh` consider
+any `git-annex` symlink (broken or not) as its original file, using
+the size and hash encoded in the symlink. This is roughly equivalent
+to the `-A` option in the case were none of the links are broken. The
+`--pretend-annex` and `--unique` options are compatible, but there is
+then a low probability of getting an incorrect result, roughly equal
+to `n^2 / 2^b` where `n` is the number of symlinks and `b` likely the
+default word size (e.g. 64).
+
+## Compromising speed for DB size
+
+The `--optimize-space` option will prevent directories with no more
+than 1 contained entry and files with disk usage less than 4KiB from
+being recorded in the DB. It's possible to shrink the DB by using this
+option against a set of paths which have already been recorded (note
+that the size of the DB file may not appear to decrease: the DB needs
+to be "compacted" for the effect to be visible immediately).
 
 ## Compatibility and dependency
 
