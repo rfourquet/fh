@@ -320,13 +320,19 @@ mkEntry'' :: Options -> DB -> DBTime -> Seen
 mkEntry'' opt db now seen path status
   | isRegularFile status = do
       let newent' = return . Just . Entry path mode True size du 1
-          newent put key = do
+          newent exists key = do
             h' <- try $ sha1sum path :: IO (Either IOException ByteString)
             case h' of
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    newent' Nothing
-              Right h        -> do _ <- put db dev $ mkDBEntry (key, now, size, du, 1, h)
-                                   newent' $ Just h
+              Right h        -> do
+                if optOptimS opt && du <= 4096
+                  -- quite arbitrary threshold: smaller values don't change performance much: there
+                  -- is always significant overhead for having to read file content at all
+                  then when exists $ deleteDB db dev $ fromKey key
+                  else let put = if exists then updateDB else insertDB
+                       in  put db dev $ mkDBEntry (key, now, size, du, 1, h)
+                newent' $ Just h
       if optSHA1' opt
         -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
         -- we can as well avoid the getDB call in this case, as a small optimization
@@ -338,14 +344,14 @@ mkEntry'' opt db now seen path status
             key <- mkKey opt db status path
             entry_ <- getDB db dev $ fromKey key
             case entry_ of
-              Nothing -> newent insertDB key
+              Nothing -> newent False key
               Just (_, t, s, _, _, h, p)
                 | s /= size                            ||
-                  not (keyMatches key p)               -> newent updateDB key
+                  not (keyMatches key p)               -> newent True key
                 | t == now                             ||
                   (cl == 1 || cl == 2) && t >= cmtime  ||
                   cl == 3                              -> newent' $ Just h
-                | otherwise                            -> newent updateDB key
+                | otherwise                            -> newent True key
       else newent' Nothing
   | isSymbolicLink status = do
       target <- readSymbolicLink path
