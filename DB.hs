@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module DB (DB, DBEntry, DBKey, DBTime, closeDB, createDBDirectory, getDB,
-           getHID, getTarget, insertDB, newDB, resetHID, updateDB) where
+           getHID, getTarget, insertDB, newDB, deleteDB, resetHID, updateDB) where
 
 import           Control.Monad      (join, mapM_, (>=>))
 import qualified Data.ByteString    as BS
@@ -57,6 +57,9 @@ updateDB db dev entry = setDB db dev >>= mapM_ (update' entry)
 
 getDB :: DB -> DeviceID -> DBKey -> IO (Maybe DBEntry)
 getDB db dev key = fmap join $ setDB db dev >>= mapM (get' key)
+
+deleteDB :: DB -> DeviceID -> DBKey -> IO ()
+deleteDB db dev key = setDB db dev >>= mapM_ (delete' key)
 
 getTarget :: DB -> DeviceID -> IO (Maybe FilePath)
 getTarget db dev = join . fmap _mntTarget <$> setDB db dev
@@ -134,6 +137,7 @@ data DB' = DB' { _dev       :: DeviceID
                , _ins       :: Statement
                , _upd       :: Statement
                , _get       :: Statement
+               , _del       :: Statement
                }
 
 setDB :: DB -> DeviceID -> IO (Maybe DB')
@@ -174,11 +178,12 @@ open' dev target path = do
     <$> prepare db "INSERT INTO files values (?, ?, ?, ?, ?, ?, ?)"
     <*> prepare db "UPDATE files SET utime=?, size=?, du=?, cnt=?, sha1=?, hpath=? WHERE key=?"
     <*> prepare db "SELECT * FROM files WHERE key=?"
+    <*> prepare db "DELETE   FROM files WHERE key=?"
 
 close' :: DB' -> IO ()
 close' db = do
     exec (_DB db) "END TRANSACTION"
-    mapM_ finalize [_ins db, _upd db, _get db]
+    mapM_ finalize [_ins db, _upd db, _get db, _del db]
     close (_DB db)
 
 int :: Integral a => a -> SQLData
@@ -210,6 +215,13 @@ get' key db = do
       [_, SQLInteger utime, SQLInteger size, SQLInteger du, SQLInteger cnt, SQLBlob sha1, SQLBlob hpath] <-
         typedColumns get $ replicate 5 (Just IntegerColumn) ++ [Just BlobColumn, Just BlobColumn]
       return $ Just (key, utime, fromIntegral size, fromIntegral du, fromIntegral cnt, sha1, hpath)
+
+delete' :: DBKey -> DB' -> IO ()
+delete' key db = do
+  let del = _del db
+  bindInt64 del 1 key
+  _ <- step del
+  reset del
 
 
 -- ** Hash ID

@@ -362,7 +362,7 @@ mkEntry'' opt db now seen path status
                           else Nothing
   | isDirectory status = do
       key <- mkKey opt db status path
-      let newent put = do
+      let newent exists = do
             files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
             case files' of
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
@@ -370,22 +370,25 @@ mkEntry'' opt db now seen path status
               Right files -> do
                 entries <- sequence $ mkEntry opt db now seen False . (path </>) <$> files :: IO [Maybe Entry]
                 let dir = combine (path, mode, True, du) $ catMaybes entries
-                when (_sizeOK dir) $
-                  -- if the above condition is true, a read error occured somewhere and the info
-                  -- can't reliably be stored into the DB
-                  unless (optOptimS opt && (null files || null (tail files))) $ -- don't store dirs of length <= 1
-                    put db dev $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe B.empty (_hash dir))
+                if _sizeOK dir &&
+                   -- if the above condition is true, a read error occured somewhere and the info
+                   -- can't reliably be stored into the DB
+                   not (optOptimS opt && (null files || null (tail files))) -- don't store dirs of length <= 1
+                  then
+                    let put = if exists then updateDB else insertDB
+                    in  put db dev $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe B.empty (_hash dir))
+                  else when exists $ deleteDB db dev $ fromKey key
                 return . Just $ dir
       entry_ <- getDB db dev $ fromKey key
       case entry_ of
-        Nothing -> newent insertDB
+        Nothing -> newent False
         Just (_, t, s, d, n, h, p)
           | B.null h && optSHA1' opt || -- hash requested but not available
-            not (keyMatches key p)   -> newent updateDB
+            not (keyMatches key p)   -> newent True
           | t == now                 ||
             cl == 2 && t >= cmtime   ||
             cl == 3                  -> newent'
-          | otherwise                -> newent updateDB
+          | otherwise                -> newent True
           where newent' = return . Just $ Entry path mode True s d n (if B.null h then Nothing else Just h)
   | otherwise = return . Just . Entry path mode True size du 0 . Just $ B.pack $ replicate 20 0
   where dev    = deviceID status
