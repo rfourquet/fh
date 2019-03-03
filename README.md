@@ -79,7 +79,7 @@ and the additional help (`--long-help`) for two options:
  When the size of a file has changed since cached, the hash is unconditionally
  re-computed (even when L = 3).
  The default value of L is
-   * 1 when hashes are requested (should be reliable in most cases)
+   * 1 when hashes are requested (should be reliable in most cases),
        or when the unique option is active (it's otherwise easy to get
        confusing results with L = 2), and
    * 2 when only the size is requested (this avoids to recursively traverse

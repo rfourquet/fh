@@ -101,10 +101,9 @@ optSortS opt = _optSortS opt && not (optSortCnt opt || _optSortD opt)
 optSortD opt = _optSortD opt && not (optSortCnt opt)
 
 optCLevel :: Options -> CacheLevel
-optCLevel opt | _optCLevel opt == -1 &&
-                  (optSHA1' opt || optUnique opt || optAPretend opt) = 1
-              | _optCLevel opt == -1                                 = 2
-              | otherwise                                            = _optCLevel opt
+optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
+              | _optCLevel opt == -1                                    = 2
+              | otherwise                                               = _optCLevel opt
 
 parserOptions :: Parser Options
 parserOptions = Options
@@ -192,8 +191,8 @@ printHelp = putStrLn
   \ re-computed (even when L = 3).                                               \n\
   \ The default value of L is                                                    \n\
   \   * 1 when hashes are requested (should be reliable in most cases),          \n\
-  \       or when the unique or pretend-annex options are active (it's otherwise \n\
-  \       easy to get confusing results with L = 2), and                         \n\
+  \       or when the unique option is active (it's otherwise easy to get        \n\
+  \       confusing results with L = 2), and                                     \n\
   \   * 2 when only the size is requested (this avoids to recursively traverse   \n\
   \       directories, which would then be no better than du).                   \n\
   \\n\
@@ -376,7 +375,7 @@ mkEntry'' opt db now seen path status
                      -- we make sure the high bit is set to reduce risk of collisions
              continue <- updateSeen opt seen status $ Just key
              return $ if continue
-                      then Just . Entry path regularFileMode False s (guessDU s) 1 $
+                      then Just . Entry path regularFileMode True s (guessDU s) 1 $
                                     if optSHA1' opt then Just h else Nothing
                       else Nothing
          | optSLink opt || optALink opt && ".git/annex/objects/" `isInfixOf` target -> do
@@ -462,30 +461,30 @@ isDir e = directoryMode == intersectFileModes directoryMode (_mode e)
 
 data Key = Inode DBKey | PathHash DBKey ByteString
 
--- the four high bits of the DBKey part of the Key for directories
--- encode whether symbolic links are followed, git-annex links are
--- followed, only unique files are handled, or modes are used for hashes
+-- the five high bits of the DBKey part of the Key for directories
+-- encode whether some options are active
 mkKey :: Options -> DB -> FileStatus -> FilePath -> IO Key
 mkKey opt db status path = do
   target' <- getTarget db $ deviceID status :: IO (Maybe FilePath)
   case target' of
     Nothing ->
       let ino = fromIntegral . fileID $ status :: DBKey
-      in if mask60 ino == ino
+      in if mask ino == ino
            then return $ Inode $ bits .|. ino
            else error "unexpected inode number"
     Just target -> do
       realpath <- canonicalizePath path
       let hash = SHA1.hash . fromRawString $ makeRelative target realpath
           ws   = fromIntegral <$> B.unpack hash :: [DBKey]
-          h64  = mask60 $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
+          h64  = mask $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
       return $ PathHash (bits .|. h64) hash
   where bits = if optSLink    opt && isDirectory status then bit 63 else 0
            .|. if optALink    opt && isDirectory status then bit 62 else 0
-           .|. if optUnique   opt && isDirectory status then bit 61 else 0
-           .|. if optUseModes opt && isDirectory status then bit 60 else 0
-        mask60 :: DBKey -> DBKey
-        mask60 = (.&. (bit 60 - 1))
+           .|. if optAPretend opt && isDirectory status then bit 61 else 0
+           .|. if optUnique   opt && isDirectory status then bit 60 else 0
+           .|. if optUseModes opt && isDirectory status then bit 59 else 0
+        mask :: DBKey -> DBKey
+        mask = (.&. (bit 59 - 1))
 
 fromKey :: Key -> DBKey
 fromKey (Inode k)      = k
