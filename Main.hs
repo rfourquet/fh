@@ -212,6 +212,15 @@ main = do
      | optHelp opt -> printHelp
      | otherwise -> do
          seen <- newIORef Set.empty :: IO Seen
+         -- `now` is computed only once so that it's possible to easily detect whether an entry has
+         -- already been computed in this run, in which case the DB value can be used regardless of
+         -- the cache level (this can save significant time, e.g. 2x or 3x speed-up).
+         -- The small drawback is if a file is updated after the program started but before being
+         -- seen by it (a re-computation could be triggered unnecessarily in a subsequent run).
+         -- The `seen` set could also be used, but it's more heavy to maintain when the --unique
+         -- option is not active.
+         now <- ceiling . (10^(9::Int) *) <$> getPOSIXTime :: IO DBTime
+
          bracket newDB closeDB $ \db -> do
            when (_optHID opt > 1) $ resetHID db
 
@@ -222,7 +231,7 @@ main = do
                  putStrLn . showEntry opt hid $ ent
 
            let list' = optPaths' opt
-                     & S.mapM (uncurry $ mkEntry' opt db seen)
+                     & S.mapM (uncurry $ mkEntry' opt db now seen)
                      & S.catMaybes
                      & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
                                          optMinCnt opt <= _cnt ent)
@@ -287,13 +296,12 @@ getStatus path quiet = do
                          return Nothing
     Right status -> return $ Just status
 
-mkEntry :: Options -> DB -> Bool -> Seen -> FilePath -> IO (Maybe Entry)
-mkEntry opt db quiet seen path =
-          fmap join $ mapM (mkEntry' opt db seen path) =<< getStatus path quiet
+mkEntry :: Options -> DB -> DBTime -> Seen -> Bool -> FilePath -> IO (Maybe Entry)
+mkEntry opt db now seen quiet path =
+          fmap join $ mapM (mkEntry' opt db now seen path) =<< getStatus path quiet
 
-mkEntry' :: Options -> DB -> Seen -> FilePath -> FileStatus -> IO (Maybe Entry)
-mkEntry' opt db seen path status = do
-  now' <- getPOSIXTime
+mkEntry' :: Options -> DB -> DBTime -> Seen -> FilePath -> FileStatus -> IO (Maybe Entry)
+mkEntry' opt db now seen path status = do
   seen' <- if optUnique opt
              then readIORef seen
              else return Set.empty
@@ -301,12 +309,12 @@ mkEntry' opt db seen path status = do
   if optUnique opt && Set.member devino seen'
     then return Nothing
     else do writeIORef seen $ Set.insert devino seen'
-            mkEntry'' opt db seen path status now'
+            mkEntry'' opt db now seen path status
 
-mkEntry'' :: Options -> DB -> Seen
-          -> FilePath -> FileStatus -> POSIXTime
+mkEntry'' :: Options -> DB -> DBTime -> Seen
+          -> FilePath -> FileStatus
           -> IO (Maybe Entry)
-mkEntry'' opt db seen path status now'
+mkEntry'' opt db now seen path status
   | isRegularFile status = do
       let newent' = return . Just . Entry path mode True size du 1
           newent put key = do
@@ -329,17 +337,18 @@ mkEntry'' opt db seen path status now'
             case entry_ of
               Nothing -> newent insertDB key
               Just (_, t, s, _, _, h, p)
-                | s /= size                           -> newent updateDB key
-                | not $ keyMatches key p              -> newent updateDB key
-                | (cl == 1 || cl == 2) && t >= cmtime -> newent' $ Just h
-                | cl == 3                             -> newent' $ Just h
-                | otherwise                           -> newent updateDB key
+                | s /= size                            ||
+                  not (keyMatches key p)               -> newent updateDB key
+                | t == now                             ||
+                  (cl == 1 || cl == 2) && t >= cmtime  ||
+                  cl == 3                              -> newent' $ Just h
+                | otherwise                            -> newent updateDB key
       else newent' Nothing
   | isSymbolicLink status = do
       target <- readSymbolicLink path
       if optSLink opt || optALink opt && ".git/annex/objects/" `isInfixOf` target
       then do
-         ent <- mkEntry opt db True seen (takeDirectory path </> target)
+         ent <- mkEntry opt db now seen True (takeDirectory path </> target)
          return $ flip fmap ent $ \e -> e { _path = path }
       else
         -- we compute hash conditionally as directories containing only symlinks will otherwise
@@ -356,28 +365,28 @@ mkEntry'' opt db seen path status now'
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    return . Just $ Entry path mode False size du 0 Nothing
               Right files -> do
-                entries <- sequence $ mkEntry opt db False seen . (path </>) <$> files :: IO [Maybe Entry]
+                entries <- sequence $ mkEntry opt db now seen False . (path </>) <$> files :: IO [Maybe Entry]
                 let dir = combine (path, mode, True, du) $ catMaybes entries
                 when (_sizeOK dir) $
                   -- if the above condition is true, a read error occured somewhere and the info
                   -- can't reliably be stored into the DB
                   put db dev $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe B.empty (_hash dir))
                 return . Just $ dir
-      let hcompat h = not (B.null h && optSHA1' opt)
       entry_ <- getDB db dev $ fromKey key
       case entry_ of
         Nothing -> newent insertDB
         Just (_, t, s, d, n, h, p)
-          | not $ keyMatches key p              -> newent updateDB
-          | cl == 2 && t >= cmtime && hcompat h -> newent'
-          | cl == 3 && hcompat h                -> newent'
-          | otherwise                           -> newent updateDB
+          | B.null h && optSHA1' opt || -- hash requested but not available
+            not (keyMatches key p)   -> newent updateDB
+          | t == now                 ||
+            cl == 2 && t >= cmtime   ||
+            cl == 3                  -> newent'
+          | otherwise                -> newent updateDB
           where newent' = return . Just $ Entry path mode True s d n (if B.null h then Nothing else Just h)
   | otherwise = return . Just . Entry path mode True size du 0 . Just $ B.pack $ replicate 20 0
   where dev    = deviceID status
         mode   = if optUseModes opt then fileMode status else fileMode status .&. complement accessModes
         cmtime = ceiling $ 10^(9::Int) * (if optMtime opt then modificationTimeHiRes else statusChangeTimeHiRes) status
-        now    = ceiling $ 10^(9::Int) * now'
         size   = fromIntegral $ fileSize status
         du     = fileBlockSize status * 512 -- TODO: check 512 is always valid
         cl     = optCLevel opt

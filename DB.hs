@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module DB (DB, DBEntry, DBKey, closeDB, createDBDirectory, getDB,
+module DB (DB, DBEntry, DBKey, DBTime, closeDB, createDBDirectory, getDB,
            getHID, getTarget, insertDB, newDB, resetHID, updateDB) where
 
 import           Control.Monad      (join, mapM_, (>=>))
@@ -33,8 +33,9 @@ version = 0
 -- * public API
 
 type DBKey = Int64
+type DBTime = Int64
 data DB = DB [Mnt.Point] (IORef (Maybe DB')) (IORef (Maybe IDMap))
-type DBEntry = (DBKey, Int64, Int, Int, Int, BS.ByteString, BS.ByteString)
+type DBEntry = (DBKey, DBTime, Int, Int, Int, BS.ByteString, BS.ByteString)
 
 
 newDB :: IO DB
