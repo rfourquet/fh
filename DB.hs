@@ -250,7 +250,7 @@ openM = do
           \   id   INTEGER UNIQUE              ) "
   exec db "BEGIN TRANSACTION"
   IDMap db
-    <$> prepare db "SELECT COUNT(*) FROM [idmap]"
+    <$> prepare db "SELECT MAX(_ROWID_) FROM [idmap] LIMIT 1"
     <*> prepare db "SELECT id FROM [idmap] WHERE sha1=?"
     <*> prepare db "INSERT INTO [idmap] values (?, ?)"
 
