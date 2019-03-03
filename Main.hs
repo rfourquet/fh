@@ -6,7 +6,7 @@ import           Control.Exception         (IOException, bracket, try)
 import           Control.Monad             (forM_, join, unless, when)
 import           Control.Monad.Trans.Class (lift)
 import qualified Crypto.Hash.SHA1          as SHA1
-import           Data.Bits                 (complement, shiftL, shiftR, (.&.), (.|.))
+import           Data.Bits                 (complement, finiteBitSize, shiftL, shiftR, (.&.), (.|.))
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as B
 import qualified Data.ByteString.Char8     as Char8
@@ -308,16 +308,21 @@ mkEntry :: Options -> DB -> DBTime -> Seen -> Bool -> FilePath -> IO (Maybe Entr
 mkEntry opt db now seen quiet path =
           fmap join $ mapM (mkEntry' opt db now seen path) =<< getStatus path quiet
 
-mkEntry' :: Options -> DB -> DBTime -> Seen -> FilePath -> FileStatus -> IO (Maybe Entry)
-mkEntry' opt db now seen path status = do
+updateSeen :: Options -> Seen -> FileStatus -> Maybe FileID -> IO Bool
+updateSeen opt seen status key = do
   seen' <- if optUnique opt
              then readIORef seen
              else return Set.empty
-  let devino = (deviceID status, fileID status)
+  let devino = (deviceID status, fromMaybe (fileID status) key)
   if optUnique opt && Set.member devino seen'
-    then return Nothing
+    then return False
     else do writeIORef seen $ Set.insert devino seen'
-            mkEntry'' opt db now seen path status
+            return True
+
+mkEntry' :: Options -> DB -> DBTime -> Seen -> FilePath -> FileStatus -> IO (Maybe Entry)
+mkEntry' opt db now seen path status = do
+  continue <- updateSeen opt seen status Nothing
+  if continue then mkEntry'' opt db now seen path status else return Nothing
 
 mkEntry'' :: Options -> DB -> DBTime -> Seen
           -> FilePath -> FileStatus
@@ -363,10 +368,15 @@ mkEntry'' opt db now seen path status
       let annexSzHash = if optAPretend opt && ".git/annex/objects/" `isInfixOf` target
                         then getAnnexSizeAndHash target
                         else Nothing
-      if | isJust annexSzHash ->
+      if | isJust annexSzHash -> do
              let Just (s, h) = annexSzHash
-             in  return . Just . Entry path regularFileMode False s (guessDU s) 1 $
-                   if optSHA1' opt then Just h else Nothing
+                 key = read ("0x" ++ hexlify h) .|. (1 `shiftL` (finiteBitSize (0::FileID) - 1))
+                     -- we make sure the high bit is set to reduce risk of collisions
+             continue <- updateSeen opt seen status $ Just key
+             return $ if continue
+                      then Just . Entry path regularFileMode False s (guessDU s) 1 $
+                                    if optSHA1' opt then Just h else Nothing
+                      else Nothing
          | optSLink opt || optALink opt && ".git/annex/objects/" `isInfixOf` target -> do
              ent <- mkEntry opt db now seen True (takeDirectory path </> target)
              return $ flip fmap ent $ \e -> e { _path = path }
