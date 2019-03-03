@@ -310,15 +310,16 @@ mkEntry opt db now seen quiet path =
           fmap join $ mapM (mkEntry' opt db now seen path) =<< getStatus path quiet
 
 updateSeen :: Options -> Seen -> FileStatus -> Maybe FileID -> IO Bool
-updateSeen opt seen status key = do
-  seen' <- if optUnique opt
-             then readIORef seen
-             else return Set.empty
-  let devino = (deviceID status, fromMaybe (fileID status) key)
-  if optUnique opt && Set.member devino seen'
-    then return False
-    else do writeIORef seen $ Set.insert devino seen'
-            return True
+updateSeen opt seen status key =
+  if optUnique opt
+    then do
+      seen' <- readIORef seen
+      let devino = (deviceID status, fromMaybe (fileID status) key)
+      if Set.member devino seen'
+        then return False
+        else do writeIORef seen $ Set.insert devino seen'
+                return True
+    else return True
 
 mkEntry' :: Options -> DB -> DBTime -> Seen -> FilePath -> FileStatus -> IO (Maybe Entry)
 mkEntry' opt db now seen path status = do
