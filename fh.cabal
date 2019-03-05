@@ -18,7 +18,7 @@ build-type:          Simple
 
 executable fh
   main-is:             Main.hs
-  other-modules:       DB, Mnt, RawPath, Stat
+  other-modules:       DB, Hashing, Mnt, RawPath, Stat
   other-extensions:    OverloadedStrings, MultiWayIf
   build-depends:       base >=4.12 && <4.13,
                        unix >=2.7 && <2.8,

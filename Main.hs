@@ -17,20 +17,17 @@ import           Data.Function             ((&))
 import           Data.Int                  (Int64)
 import           Data.IORef
 import           Data.List                 (find, foldl', sort, sortOn)
-import           Data.List.Split           (chunksOf, splitOn)
 import           Data.Maybe                (catMaybes, fromJust, fromMaybe, isJust, isNothing)
 import           Data.Set                  (Set)
 import qualified Data.Set                  as Set
 import           Data.Time.Clock.POSIX
-import           Data.Word                 (Word8)
-import           Numeric                   (readHex, showHex)
 import           Options.Applicative       (Parser, ParserInfo, ReadM, argument, auto, columns,
                                             customExecParser, flag', fullDesc, help, helper, info,
                                             long, many, metavar, option, optional, prefs, progDesc,
                                             readerError, short, str, strOption, switch, value)
 import qualified Streaming.Prelude         as S
 import           System.Directory          (canonicalizePath)
-import           System.FilePath           (makeRelative, takeBaseName)
+import           System.FilePath           (makeRelative)
 import           System.IO                 (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
                                             mkTextEncoding, stderr, stdin, stdout)
 import           System.Posix.ByteString   (RawFilePath)
@@ -41,9 +38,9 @@ import           System.Posix.Files        (FileStatus, accessModes, deviceID, d
                                             statusChangeTimeHiRes)
 import           System.Posix.Types        (DeviceID, FileID, FileMode)
 import           Text.Printf               (printf)
-import           Text.Read                 (readMaybe)
 
 import           DB
+import           Hashing
 import           RawPath                   ((</>))
 import qualified RawPath                   as R
 import           Stat                      (fileBlockSize)
@@ -541,49 +538,7 @@ formatSize opt sI =
   in printf (if head u == ' ' then "%3.f  %s" else "%5.1f%s") s' u
 
 
--- * sha1 hash
-
--- random seed for dirs
-dirCtx :: SHA1.Ctx
-dirCtx = SHA1.update SHA1.init $ B.pack [0x2a, 0xc9, 0xd8, 0x3b, 0xc8, 0x7c, 0xe4, 0x86, 0xb2, 0x41,
-                                         0xd2, 0x27, 0xb4, 0x06, 0x93, 0x60, 0xc6, 0x2b, 0x52, 0x37]
-
--- random seed for symlinks
-symlinkCtx :: SHA1.Ctx
-symlinkCtx = SHA1.update SHA1.init $ B.pack [0x05, 0xfe, 0x0d, 0x17, 0xac, 0x9a, 0x10, 0xbc, 0x7d, 0xb1,
-                                             0x73, 0x99, 0xa6, 0xea, 0x92, 0x38, 0xfa, 0xda, 0x0f, 0x16]
-
-sha1sumSymlink :: RawFilePath -> ByteString
-sha1sumSymlink = SHA1.finalize . SHA1.update symlinkCtx
-
-sha1sum :: RawFilePath -> IO ByteString
-sha1sum = fmap SHA1.hashlazy . R.readFileLazy
-
--- TODO: check out Data.ByteString.Base16 to replace hexlify & unhexlify
-
-hexlify :: ByteString -> String
-hexlify bstr = let ws = B.unpack bstr :: [Word8]
-                   showHexPad x = if x >= 16 then showHex x else showChar '0' . showHex x
-                   hex = showHexPad <$> ws
-               in foldr ($) "" hex
-
-unhexlify :: String -> Maybe ByteString
-unhexlify h = let ws' = concatMap readHex $ chunksOf 2 h :: [(Word8, String)]
-                  valid = all (null . snd) ws'
-                  ws  = fst <$> ws'
-              in if valid then Just $ B.pack ws else Nothing
-
-getAnnexSizeAndHash :: RawFilePath -> Maybe (Int, ByteString)
-getAnnexSizeAndHash path' =
-  let path = BC.unpack path'
-      parts = splitOn "-" $ takeBaseName path
-
-  in case parts of
-     [backend, size, "", hex]
-       | backend `elem` ["SHA1", "SHA1E"] && head size == 's' && length hex == 40 ->
-           (,) <$> readMaybe (tail size) <*> unhexlify hex
-       | otherwise -> Nothing
-     _ -> Nothing
+-- * getHID'
 
 -- use #0 and #-1 resp. for empty files and directories
 getHID' :: DB -> ByteString -> IO Int64
