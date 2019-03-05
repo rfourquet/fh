@@ -18,7 +18,7 @@ build-type:          Simple
 
 executable fh
   main-is:             Main.hs
-  other-modules:       DB, Mnt, Stat
+  other-modules:       DB, Mnt, RawPath, Stat
   other-extensions:    OverloadedStrings, MultiWayIf
   build-depends:       base >=4.12 && <4.13,
                        unix >=2.7 && <2.8,
@@ -33,6 +33,8 @@ executable fh
                        direct-sqlite >= 2.3 && < 2.4,
                        cryptohash-sha1 >= 0.11 && < 0.12,
                        streaming >= 0.2 && < 0.3,
-                       transformers >= 0.5 && < 0.6
+                       transformers >= 0.5 && < 0.6,
+                       utf8-string >= 1.0 && < 1.1,
+                       rawfilepath >= 0.2 && < 0.3
   -- hs-source-dirs:
   default-language:    Haskell2010

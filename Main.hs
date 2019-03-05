@@ -1,4 +1,4 @@
-{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE MultiWayIf, OverloadedStrings #-}
 
 module Main where
 
@@ -10,13 +10,13 @@ import           Data.Bits                 (bit, complement, finiteBitSize, setB
                                             (.&.), (.|.))
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as B
-import qualified Data.ByteString.Char8     as Char8
-import qualified Data.ByteString.Lazy      as BL
+import qualified Data.ByteString.Char8     as BC
+import qualified Data.ByteString.UTF8      as B8
 import           Data.Char                 (ord)
 import           Data.Function             ((&))
 import           Data.Int                  (Int64)
 import           Data.IORef
-import           Data.List                 (find, foldl', isInfixOf, sort, sortOn)
+import           Data.List                 (find, foldl', sort, sortOn)
 import           Data.List.Split           (chunksOf, splitOn)
 import           Data.Maybe                (catMaybes, fromJust, fromMaybe, isJust, isNothing)
 import           Data.Set                  (Set)
@@ -29,22 +29,23 @@ import           Options.Applicative       (Parser, ParserInfo, ReadM, argument,
                                             long, many, metavar, option, optional, prefs, progDesc,
                                             readerError, short, str, strOption, switch, value)
 import qualified Streaming.Prelude         as S
-import           System.Directory          (canonicalizePath, listDirectory)
-import           System.FilePath           (makeRelative, takeBaseName, takeDirectory, takeFileName,
-                                            (</>))
-import           System.IO                 (Handle, getContents, hGetEncoding, hPutStrLn,
-                                            hSetEncoding, mkTextEncoding, readFile, stderr, stdin,
-                                            stdout)
+import           System.Directory          (canonicalizePath)
+import           System.FilePath           (makeRelative, takeBaseName)
+import           System.IO                 (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
+                                            mkTextEncoding, stderr, stdin, stdout)
+import           System.Posix.ByteString   (RawFilePath)
 import           System.Posix.Files        (FileStatus, accessModes, deviceID, directoryMode,
-                                            fileID, fileMode, fileSize, getSymbolicLinkStatus,
-                                            intersectFileModes, isDirectory, isRegularFile,
-                                            isSymbolicLink, modificationTimeHiRes, readSymbolicLink,
-                                            regularFileMode, statusChangeTimeHiRes)
+                                            fileID, fileMode, fileSize, intersectFileModes,
+                                            isDirectory, isRegularFile, isSymbolicLink,
+                                            modificationTimeHiRes, regularFileMode,
+                                            statusChangeTimeHiRes)
 import           System.Posix.Types        (DeviceID, FileID, FileMode)
 import           Text.Printf               (printf)
 import           Text.Read                 (readMaybe)
 
 import           DB
+import           RawPath                   ((</>))
+import qualified RawPath                   as R
 import           Stat                      (fileBlockSize)
 
 
@@ -78,7 +79,7 @@ data Options = Options { optHelp     :: Bool
                        , optOptimS   :: Bool
                        , optInitDB   :: FilePath
                        , optInput    :: Maybe FilePath  -- file containing paths to report
-                       , optPaths    :: [FilePath]
+                       , optPaths    :: [RawFilePath]
                        }
 
 optOutUnspecified :: Options -> Bool
@@ -162,7 +163,7 @@ parserOptions = Options
                                help "create a DB directory at PATH and exit")
                 <*> optional (strOption (long "files-from" <> short 'I' <> metavar "FILE" <>
                                          help "a file containing paths to work on (\"-\" for stdin)"))
-                <*> many (argument str (metavar "PATHS..." <> help "files or directories (default: \".\")"))
+                <*> many (B8.fromString <$> argument str (metavar "PATHS..." <> help "files or directories (default: \".\")"))
 
 
 options :: ParserInfo Options
@@ -256,25 +257,25 @@ main = do
 
 
 -- recursively yield paths within directories up to a fixed depth
-optPaths' :: Options -> S.Stream (S.Of (FilePath, FileStatus)) IO ()
+optPaths' :: Options -> S.Stream (S.Of (RawFilePath, FileStatus)) IO ()
 optPaths' opt = do
     input <- flip (maybe (return [])) (optInput opt) $ \file ->
-               lines <$> lift (if file == "-" then getContents else readFile file)
-    let paths = if isNothing (optInput opt) && null (optPaths opt) then ["."] else optPaths opt
+               BC.lines <$> lift (if file == "-" then B.getContents else B.readFile file)
+    let paths = if isNothing (optInput opt) && null (optPaths opt) then [BC.singleton '.'] else optPaths opt
     S.for (S.each $ input ++ paths) $ recStatus $ optDepth opt
   where
-    recStatus :: Int -> FilePath -> S.Stream (S.Of (FilePath, FileStatus)) IO ()
+    recStatus :: Int -> RawFilePath -> S.Stream (S.Of (RawFilePath, FileStatus)) IO ()
     recStatus depth path =
         -- filtering ".git" here rather than at the toplevel pipeline (in main)
         -- saves work (the recursive content of ".git" has to be pruned)
-        unless (optNoGit opt && takeFileName path == ".git") $ do
+        unless (optNoGit opt && R.takeFileName path == ".git") $ do  -- TODO: encoding?
           status' <- lift $ getStatus path False
           S.for (S.each status') $ \status -> do
             when (depth > 0 && isDirectory status) $ do
-              files' <- lift (try (listDirectory path) :: IO (Either IOException [FilePath]))
+              files' <- lift (try (R.listDirectory path) :: IO (Either IOException [RawFilePath]))
               -- we ignore exceptions here, they may reported later within mkEntry
               S.for (S.each files') $ \files ->
-                S.for (S.each (sort files))  (\p -> recStatus (depth-1) $ path </> p)
+                S.for (S.each (sort files)) $ recStatus (depth-1) . R.combine' path
             S.yield (path, status)
 
 
@@ -286,7 +287,7 @@ mkTranslitEncoding h =
 
 -- * Entry
 
-data Entry = Entry { _path   :: FilePath
+data Entry = Entry { _path   :: RawFilePath
                    , _mode   :: FileMode
                    , _sizeOK :: Bool -- size and du are reliable
                    , _size   :: Int
@@ -296,15 +297,15 @@ data Entry = Entry { _path   :: FilePath
                    } deriving (Show)
 
 
-getStatus :: FilePath -> Bool -> IO (Maybe FileStatus)
+getStatus :: RawFilePath -> Bool -> IO (Maybe FileStatus)
 getStatus path quiet = do
-  status' <- try (getSymbolicLinkStatus path) :: IO (Either IOException FileStatus)
+  status' <- try (R.getSymbolicLinkStatus path) :: IO (Either IOException FileStatus)
   case status' of
     Left exception -> do unless quiet $ hPutStrLn stderr $ "error: " ++ show exception
                          return Nothing
     Right status -> return $ Just status
 
-mkEntry :: Options -> DB -> DBTime -> Seen -> Bool -> FilePath -> IO (Maybe Entry)
+mkEntry :: Options -> DB -> DBTime -> Seen -> Bool -> RawFilePath -> IO (Maybe Entry)
 mkEntry opt db now seen quiet path =
           fmap join $ mapM (mkEntry' opt db now seen path) =<< getStatus path quiet
 
@@ -320,13 +321,13 @@ updateSeen opt seen status key =
                 return True
     else return True
 
-mkEntry' :: Options -> DB -> DBTime -> Seen -> FilePath -> FileStatus -> IO (Maybe Entry)
+mkEntry' :: Options -> DB -> DBTime -> Seen -> RawFilePath -> FileStatus -> IO (Maybe Entry)
 mkEntry' opt db now seen path status = do
   continue <- updateSeen opt seen status Nothing
   if continue then mkEntry'' opt db now seen path status else return Nothing
 
 mkEntry'' :: Options -> DB -> DBTime -> Seen
-          -> FilePath -> FileStatus
+          -> RawFilePath -> FileStatus
           -> IO (Maybe Entry)
 mkEntry'' opt db now seen path status
   | isRegularFile status = do
@@ -365,8 +366,8 @@ mkEntry'' opt db now seen path status
                 | otherwise                            -> newent True key
       else newent' Nothing
   | isSymbolicLink status = do
-      target <- readSymbolicLink path
-      let annexSzHash = if optAPretend opt && ".git/annex/objects/" `isInfixOf` target
+      target <- R.readSymbolicLink path
+      let annexSzHash = if optAPretend opt && ".git/annex/objects/" `B.isInfixOf` target
                         then getAnnexSizeAndHash target
                         else Nothing
       if | isJust annexSzHash -> do
@@ -378,8 +379,8 @@ mkEntry'' opt db now seen path status
                       then Just . Entry path regularFileMode True s (guessDU s) 1 $
                                     if optSHA1' opt then Just h else Nothing
                       else Nothing
-         | optSLink opt || optALink opt && ".git/annex/objects/" `isInfixOf` target -> do
-             ent <- mkEntry opt db now seen True (takeDirectory path </> target)
+         | optSLink opt || optALink opt && ".git/annex/objects/" `B.isInfixOf` target -> do
+             ent <- mkEntry opt db now seen True (R.takeDirectory path </> target)
              return $ flip fmap ent $ \e -> e { _path = path }
          | otherwise ->
              -- we compute hash conditionally as directories containing only symlinks will otherwise
@@ -391,12 +392,12 @@ mkEntry'' opt db now seen path status
   | isDirectory status = do
       key <- mkKey opt db status path
       let newent exists = do
-            files' <- try (listDirectory path) :: IO (Either IOException [FilePath])
+            files' <- try (R.listDirectory path) :: IO (Either IOException [RawFilePath])
             case files' of
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    return . Just $ Entry path mode False size du 0 Nothing
               Right files -> do
-                entries <- sequence $ mkEntry opt db now seen False . (path </>) <$> files :: IO [Maybe Entry]
+                entries <- sequence $ mkEntry opt db now seen False . R.combine' path <$> files :: IO [Maybe Entry]
                 let dir = combine (path, mode, True, du) $ catMaybes entries
                 if _sizeOK dir &&
                    -- if the above condition is true, a read error occured somewhere and the info
@@ -428,12 +429,12 @@ mkEntry'' opt db now seen path status
         guessDU s = 4096 * (1 + div (s-1) 4096)
 
 -- the 1st param gives non-cumulated (own) size and other data for resulting Entry
-combine :: (String, FileMode, Bool, Int) -> [Entry] -> Entry
+combine :: (RawFilePath, FileMode, Bool, Int) -> [Entry] -> Entry
 combine (name, mode, ok0, d0) entries = finalize $ foldl' update (ok0, 0, d0, 0, pure dirCtx) entries'
-  where entries' = sortOn _path [ e { _path = takeFileName $ _path e } | e <- entries ]
+  where entries' = sortOn _path [ e { _path = R.takeFileName $ _path e } | e <- entries ]
         update (ok, s, d, n, ctx) (Entry p m ok' size du cnt hash) =
           (ok && ok', s + dirEntrySize p size, d+du, n+cnt, SHA1.update <$> ctx <*>
-              fmap B.concat (sequence [hash, Just $ pack32 m, Just $ Char8.pack p, Just $ B.singleton 0]))
+              fmap B.concat (sequence [hash, Just $ pack32 m, Just p, Just $ B.singleton 0]))
               -- The mode of a file has no effect on its hash, only on its containing dir's hash;
               -- this is similar to how git does.
               -- We add '\0' (`singleton 0`) to be sure that 2 unequal dirs won't have the same hash;
@@ -446,7 +447,7 @@ combine (name, mode, ok0, d0) entries = finalize $ foldl' update (ok0, 0, d0, 0,
 --   accross file systems
 -- + an empty dir has null size as this is useful to easily spot
 -- + the default reports only the sum of the sizes of contained files
-dirEntrySize :: FilePath -> Int -> Int
+dirEntrySize :: RawFilePath -> Int -> Int
 dirEntrySize _ s = s
 
 -- possibe alternative with an option
@@ -463,7 +464,7 @@ data Key = Inode DBKey | PathHash DBKey ByteString
 
 -- the five high bits of the DBKey part of the Key for directories
 -- encode whether some options are active
-mkKey :: Options -> DB -> FileStatus -> FilePath -> IO Key
+mkKey :: Options -> DB -> FileStatus -> RawFilePath -> IO Key
 mkKey opt db status path = do
   target' <- getTarget db $ deviceID status :: IO (Maybe FilePath)
   case target' of
@@ -473,7 +474,8 @@ mkKey opt db status path = do
            then return $ Inode $ bits .|. ino
            else error "unexpected inode number"
     Just target -> do
-      realpath <- canonicalizePath path
+      let path' = B8.toString path
+      realpath <- canonicalizePath path'
       let hash = SHA1.hash . fromRawString $ makeRelative target realpath
           ws   = fromIntegral <$> B.unpack hash :: [DBKey]
           h64  = mask $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
@@ -511,9 +513,12 @@ fromRawString s = B.pack . concat $ charToBytes . ord <$> s
 
 -- * display
 
+-- TODO: decode via UTF8 only when interactive (stdout is a tty)
+-- TODO: use system encoding instead of hardcoded UTF8
 showEntry :: Options -> Maybe Int64 -> Entry -> String
-showEntry opt hid ent@(Entry path _ _ size du cnt hash) =
-  let np    = if optCnt opt then
+showEntry opt hid ent@(Entry path' _ _ size du cnt hash) =
+  let path  = B8.toString path'
+      np    = if optCnt opt then
                 if isDir ent then printf "%14s" ("("++ show cnt ++ ")  ") ++ path
                              else "              " ++ path
                 else path
@@ -548,11 +553,11 @@ symlinkCtx :: SHA1.Ctx
 symlinkCtx = SHA1.update SHA1.init $ B.pack [0x05, 0xfe, 0x0d, 0x17, 0xac, 0x9a, 0x10, 0xbc, 0x7d, 0xb1,
                                              0x73, 0x99, 0xa6, 0xea, 0x92, 0x38, 0xfa, 0xda, 0x0f, 0x16]
 
-sha1sumSymlink :: String -> ByteString
-sha1sumSymlink = SHA1.finalize . SHA1.update symlinkCtx . fromRawString
+sha1sumSymlink :: RawFilePath -> ByteString
+sha1sumSymlink = SHA1.finalize . SHA1.update symlinkCtx
 
-sha1sum :: FilePath -> IO ByteString
-sha1sum = fmap SHA1.hashlazy . BL.readFile
+sha1sum :: RawFilePath -> IO ByteString
+sha1sum = fmap SHA1.hashlazy . R.readFileLazy
 
 -- TODO: check out Data.ByteString.Base16 to replace hexlify & unhexlify
 
@@ -568,9 +573,11 @@ unhexlify h = let ws' = concatMap readHex $ chunksOf 2 h :: [(Word8, String)]
                   ws  = fst <$> ws'
               in if valid then Just $ B.pack ws else Nothing
 
-getAnnexSizeAndHash :: String -> Maybe (Int, ByteString)
-getAnnexSizeAndHash path =
-  let parts = splitOn "-" $ takeBaseName path
+getAnnexSizeAndHash :: RawFilePath -> Maybe (Int, ByteString)
+getAnnexSizeAndHash path' =
+  let path = BC.unpack path'
+      parts = splitOn "-" $ takeBaseName path
+
   in case parts of
      [backend, size, "", hex]
        | backend `elem` ["SHA1", "SHA1E"] && head size == 's' && length hex == 40 ->
