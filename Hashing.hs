@@ -1,16 +1,23 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Hashing (dirCtx, getAnnexSizeAndHash, hexlify, sha1sum, sha1sumSymlink) where
 
-import qualified Crypto.Hash.SHA1        as SHA1
-import           Data.ByteString         (ByteString)
-import qualified Data.ByteString         as B
-import qualified Data.ByteString.Char8   as BC
-import           Data.List.Split         (chunksOf, splitOn)
-import           Data.Word               (Word8)
-import           Numeric                 (readHex, showHex)
-import qualified RawPath                 as R
-import           System.FilePath         (takeBaseName)
-import           System.Posix.ByteString (RawFilePath)
-import           Text.Read               (readMaybe)
+import           Control.Applicative              ((<|>))
+import           Control.Monad                    (when)
+import qualified Crypto.Hash.SHA1                 as SHA1
+import           Data.Attoparsec.ByteString       (Parser, anyWord8, count, endOfInput, inClass,
+                                                   match, parseOnly, satisfy, skipMany1, string)
+import           Data.Attoparsec.ByteString.Char8 (char8, decimal)
+import           Data.ByteString                  (ByteString)
+import qualified Data.ByteString                  as B
+import qualified Data.ByteString.Char8            as BC
+import           Data.Functor                     (void)
+import           Data.List.Split                  (chunksOf)
+import           Data.Word                        (Word8)
+import           Numeric                          (readHex, showHex)
+import           System.Posix.ByteString          (RawFilePath)
+
+import qualified RawPath                          as R
 
 
 -- random seed for dirs
@@ -44,13 +51,30 @@ unhexlify h = let ws' = concatMap readHex $ chunksOf 2 h :: [(Word8, String)]
               in if valid then Just $ B.pack ws else Nothing
 
 getAnnexSizeAndHash :: RawFilePath -> Maybe (Int, ByteString)
-getAnnexSizeAndHash path' =
-  let path = BC.unpack path'
-      parts = splitOn "-" $ takeBaseName path
+getAnnexSizeAndHash path =
+  case parseOnly annexKeyP $ R.takeFileName path of
+    Left _               -> Nothing
+    Right (AnnexKey s h) -> (,) <$> Just s <*> unhexlify (BC.unpack h)
 
-  in case parts of
-     [backend, size, "", hex]
-       | backend `elem` ["SHA1", "SHA1E"] && head size == 's' && length hex == 40 ->
-           (,) <$> readMaybe (tail size) <*> unhexlify hex
-       | otherwise -> Nothing
-     _ -> Nothing
+type HexString = ByteString
+
+data AnnexKey = AnnexKey { _size :: Int
+                         , _hash :: HexString
+                         } deriving Show
+
+annexKeyP :: Parser AnnexKey
+annexKeyP = do
+    algo <- string "SHA1E" <|> string "SHA1"
+    dash
+    char8' 's'
+    s <- decimal
+    dash >> dash
+    (h, _) <- match $ count 40 hex
+    when (algo == "SHA1E") $ do
+      char8' '.'
+      skipMany1 anyWord8 -- git-annex probably allows only 3 or 4 chars as extension
+    endOfInput
+    return $ AnnexKey s h
+  where dash = char8' '-'
+        hex = satisfy $ inClass "0-9a-f"
+        char8' = void . char8 -- to suppress "unused-do-bind" warnings
