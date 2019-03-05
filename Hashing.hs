@@ -5,12 +5,11 @@ module Hashing (dirCtx, getAnnexSizeAndHash, hexlify, sha1sum, sha1sumSymlink) w
 import           Control.Applicative              ((<|>))
 import           Control.Monad                    (when)
 import qualified Crypto.Hash.SHA1                 as SHA1
-import           Data.Attoparsec.ByteString       (Parser, anyWord8, count, endOfInput, inClass,
-                                                   match, parseOnly, satisfy, skipMany1, string)
-import           Data.Attoparsec.ByteString.Char8 (char8, decimal)
+import           Data.Attoparsec.ByteString       (Parser, anyWord8, count, endOfInput, parseOnly,
+                                                   skipMany1, string)
+import           Data.Attoparsec.ByteString.Char8 (char8, decimal, inClass, satisfy)
 import           Data.ByteString                  (ByteString)
 import qualified Data.ByteString                  as B
-import qualified Data.ByteString.Char8            as BC
 import           Data.Functor                     (void)
 import           Data.List.Split                  (chunksOf)
 import           Data.Word                        (Word8)
@@ -44,22 +43,19 @@ hexlify bstr = let ws = B.unpack bstr :: [Word8]
                    hex = showHexPad <$> ws
                in foldr ($) "" hex
 
-unhexlify :: String -> Maybe ByteString
-unhexlify h = let ws' = concatMap readHex $ chunksOf 2 h :: [(Word8, String)]
-                  valid = all (null . snd) ws'
-                  ws  = fst <$> ws'
-              in if valid then Just $ B.pack ws else Nothing
+-- assumes a valid hex string
+unhexlify' :: String -> ByteString
+unhexlify' h = let ws = concatMap readHex $ chunksOf 2 h :: [(Word8, String)]
+               in  B.pack $ fst <$> ws
 
 getAnnexSizeAndHash :: RawFilePath -> Maybe (Int, ByteString)
 getAnnexSizeAndHash path =
   case parseOnly annexKeyP $ R.takeFileName path of
     Left _               -> Nothing
-    Right (AnnexKey s h) -> (,) <$> Just s <*> unhexlify (BC.unpack h)
-
-type HexString = ByteString
+    Right (AnnexKey s h) -> Just (s, h)
 
 data AnnexKey = AnnexKey { _size :: Int
-                         , _hash :: HexString
+                         , _hash :: ByteString
                          } deriving Show
 
 annexKeyP :: Parser AnnexKey
@@ -69,12 +65,12 @@ annexKeyP = do
     char8' 's'
     s <- decimal
     dash >> dash
-    (h, _) <- match $ count 40 hex
+    h <- count 40 hex
     when (algo == "SHA1E") $ do
       char8' '.'
       skipMany1 anyWord8 -- git-annex probably allows only 3 or 4 chars as extension
     endOfInput
-    return $ AnnexKey s h
+    return $ AnnexKey s $ unhexlify' h
   where dash = char8' '-'
         hex = satisfy $ inClass "0-9a-f"
         char8' = void . char8 -- to suppress "unused-do-bind" warnings
