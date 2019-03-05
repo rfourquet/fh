@@ -6,8 +6,8 @@ import           Control.Exception         (IOException, bracket, try)
 import           Control.Monad             (forM_, join, unless, when)
 import           Control.Monad.Trans.Class (lift)
 import qualified Crypto.Hash.SHA1          as SHA1
-import           Data.Bits                 (bit, complement, finiteBitSize, setBit, shiftL, shiftR,
-                                            (.&.), (.|.))
+import           Data.Bits                 (Bits, bit, complement, finiteBitSize, setBit, shiftL,
+                                            shiftR, (.&.), (.|.))
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as B
 import qualified Data.ByteString.Char8     as BC
@@ -369,7 +369,7 @@ mkEntry'' opt db now seen path status
                         else Nothing
       if | isJust annexSzHash -> do
              let Just (s, h) = annexSzHash
-                 key = read ("0x" ++ hexlify h) `setBit` (finiteBitSize (0::FileID) - 1)
+                 key = toIntegral h `setBit` (finiteBitSize (0::FileID) - 1)
                      -- we make sure the high bit is set to reduce risk of collisions
              continue <- updateSeen opt seen status $ Just key
              return $ if continue
@@ -538,7 +538,7 @@ formatSize opt sI =
   in printf (if head u == ' ' then "%3.f  %s" else "%5.1f%s") s' u
 
 
--- * getHID'
+-- * misc.
 
 -- use #0 and #-1 resp. for empty files and directories
 getHID' :: DB -> ByteString -> IO Int64
@@ -546,3 +546,8 @@ getHID' db hash
   | hash == SHA1.finalize SHA1.init = return 0
   | hash == SHA1.finalize dirCtx    = return (-1)
   | otherwise                       = getHID db hash
+
+
+toIntegral :: (Integral a, Bits a) => ByteString -> a
+toIntegral = fst . B.foldl' f (0, 0)
+  where f (s, i) w8 = (s + fromIntegral w8 `shiftL` i, i+8)
