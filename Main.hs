@@ -348,9 +348,8 @@ mkEntry'' opt db now seen mHash path status
         -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
         -- we can as well avoid the getDB call in this case, as a small optimization
       then do
-        let annexSzHash = if optATrust opt
-                            then mHash <|> snd <$> getAnnexSizeAndHash False path
-                            else Nothing
+        let annexSzHash = optATrust opt
+                        |>> mHash <|> snd <$> getAnnexSizeAndHash False path
         if isJust annexSzHash
           then newent' annexSzHash
           else do
@@ -368,18 +367,16 @@ mkEntry'' opt db now seen mHash path status
       else newent' Nothing
   | isSymbolicLink status = do
       target <- R.readSymbolicLink path
-      let annexSzHash = if optAPretend opt || optALink opt
-                          then getAnnexSizeAndHash True target
-                          else Nothing
+      let annexSzHash = optAPretend opt || optALink opt
+                      |>> getAnnexSizeAndHash True target
       if | optAPretend opt && isJust annexSzHash -> do
              let Just (s, h) = annexSzHash
                  key = toIntegral h `setBit` (finiteBitSize (0::FileID) - 1)
                      -- we make sure the high bit is set to reduce risk of collisions
              continue <- updateSeen opt seen status $ Just key
-             return $ if continue
-                      then Just . Entry path regularFileMode True s (guessDU s) 1 $
-                                    if optSHA1' opt then Just h else Nothing
-                      else Nothing
+             return $ continue
+                      |>> (Just . Entry path regularFileMode True s (guessDU s) 1 $
+                                    optSHA1' opt |>> Just h)
          | optSLink opt || optALink opt && isJust annexSzHash -> do
              ent <- mkEntry opt db now seen (snd <$> annexSzHash) (R.takeDirectory path </> target)
              return $ flip fmap ent $ \e -> e { _path = path }
@@ -388,8 +385,7 @@ mkEntry'' opt db now seen mHash path status
              -- provoke its evaluation; putting instead the condition when storing dir infos into the DB
              -- seems to make the matter worse (requiring then to make the hash field strict...)
              return . Just . Entry path mode True size du 0 $
-               if optSHA1' opt then Just $ sha1sumSymlink target
-                               else Nothing
+               optSHA1' opt |>> Just (sha1sumSymlink target)
   | isDirectory status = do
       key <- mkKey opt db status path
       let newent exists = do
@@ -555,3 +551,9 @@ getHID' db hash
 toIntegral :: (Integral a, Bits a) => ByteString -> a
 toIntegral = fst . B.foldl' f (0, 0)
   where f (s, i) w8 = (s + fromIntegral w8 `shiftL` i, i+8)
+
+
+(|>>) :: Bool -> Maybe a -> Maybe a
+b |>> m = if b then m else Nothing
+
+infixl 1 |>>
