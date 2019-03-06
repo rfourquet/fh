@@ -5,15 +5,15 @@ module Hashing (dirCtx, getAnnexSizeAndHash, hexlify, sha1sum, sha1sumSymlink) w
 import           Control.Applicative              ((<|>))
 import           Control.Monad                    (when)
 import qualified Crypto.Hash.SHA1                 as SHA1
-import           Data.Attoparsec.ByteString       (Parser, anyWord8, count, endOfInput, parseOnly,
-                                                   skipMany1, string)
-import           Data.Attoparsec.ByteString.Char8 (char8, decimal, inClass, satisfy)
+import           Data.Attoparsec.ByteString       (Parser, anyWord8, count, endOfInput, inClass,
+                                                   match, parseOnly, satisfy, skipMany1, string)
+import           Data.Attoparsec.ByteString.Char8 (char8, decimal)
+import           Data.Bits                        (shiftL, (.|.))
 import           Data.ByteString                  (ByteString)
 import qualified Data.ByteString                  as B
 import           Data.Functor                     (void)
-import           Data.List.Split                  (chunksOf)
 import           Data.Word                        (Word8)
-import           Numeric                          (readHex, showHex)
+import           Numeric                          (showHex)
 import           System.Posix.ByteString          (RawFilePath)
 
 import qualified RawPath                          as R
@@ -44,9 +44,14 @@ hexlify bstr = let ws = B.unpack bstr :: [Word8]
                in foldr ($) "" hex
 
 -- assumes a valid hex string
-unhexlify' :: String -> ByteString
-unhexlify' h = let ws = concatMap readHex $ chunksOf 2 h :: [(Word8, String)]
-               in  B.pack $ fst <$> ws
+unhexlify' :: ByteString -> ByteString
+unhexlify' h = B.pack . fst $ B.foldr' f ([], Nothing) h
+  where f w (ws, carry) =
+            case carry of
+              Nothing -> (ws, Just $ val w)
+              Just v  -> ((v .|. val w `shiftL` 4):ws, Nothing)
+        val w = if w <= 57 then w - 48 else w - 87
+
 
 getAnnexSizeAndHash :: RawFilePath -> Maybe (Int, ByteString)
 getAnnexSizeAndHash path =
@@ -65,7 +70,7 @@ annexKeyP = do
     char8' 's'
     s <- decimal
     dash >> dash
-    h <- count 40 hex
+    (h, _) <- match $ count 40 hex
     when (algo == "SHA1E") $ do
       char8' '.'
       skipMany1 anyWord8 -- git-annex probably allows only 3 or 4 chars as extension
