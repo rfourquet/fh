@@ -2,6 +2,7 @@
 
 module Main where
 
+import           Control.Applicative       ((<|>))
 import           Control.Exception         (IOException, bracket, try)
 import           Control.Monad             (forM_, join, unless, when)
 import           Control.Monad.Trans.Class (lift)
@@ -237,7 +238,7 @@ main = do
                  putStrLn . showEntry opt hid $ ent
 
            let list' = optPaths' opt
-                     & S.mapM (uncurry $ mkEntry' opt db now seen)
+                     & S.mapM (uncurry $ mkEntry' opt db now seen Nothing)
                      & S.catMaybes
                      & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
                                          optMinCnt opt <= _cnt ent)
@@ -302,9 +303,9 @@ getStatus path quiet = do
                          return Nothing
     Right status -> return $ Just status
 
-mkEntry :: Options -> DB -> DBTime -> Seen -> Bool -> RawFilePath -> IO (Maybe Entry)
-mkEntry opt db now seen quiet path =
-          fmap join $ mapM (mkEntry' opt db now seen path) =<< getStatus path quiet
+mkEntry :: Options -> DB -> DBTime -> Seen -> Maybe ByteString -> RawFilePath -> IO (Maybe Entry)
+mkEntry opt db now seen mHash path =
+          fmap join $ mapM (mkEntry' opt db now seen mHash path) =<< getStatus path (isJust mHash)
 
 updateSeen :: Options -> Seen -> FileStatus -> Maybe FileID -> IO Bool
 updateSeen opt seen status key =
@@ -318,15 +319,16 @@ updateSeen opt seen status key =
                 return True
     else return True
 
-mkEntry' :: Options -> DB -> DBTime -> Seen -> RawFilePath -> FileStatus -> IO (Maybe Entry)
-mkEntry' opt db now seen path status = do
+mkEntry' :: Options -> DB -> DBTime -> Seen -> Maybe ByteString ->
+            RawFilePath -> FileStatus -> IO (Maybe Entry)
+mkEntry' opt db now seen mHash path status = do
   continue <- updateSeen opt seen status Nothing
-  if continue then mkEntry'' opt db now seen path status else return Nothing
+  if continue then mkEntry'' opt db now seen mHash path status else return Nothing
 
 mkEntry'' :: Options -> DB -> DBTime -> Seen
-          -> RawFilePath -> FileStatus
+          -> Maybe ByteString -> RawFilePath -> FileStatus
           -> IO (Maybe Entry)
-mkEntry'' opt db now seen path status
+mkEntry'' opt db now seen mHash path status
   | isRegularFile status = do
       let newent' = return . Just . Entry path mode True size du 1
           newent exists key = do
@@ -346,9 +348,11 @@ mkEntry'' opt db now seen path status
         -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
         -- we can as well avoid the getDB call in this case, as a small optimization
       then do
-        let annexSzHash = if optATrust opt then getAnnexSizeAndHash False path else Nothing
+        let annexSzHash = if optATrust opt
+                            then mHash <|> snd <$> getAnnexSizeAndHash False path
+                            else Nothing
         if isJust annexSzHash
-          then newent' $ snd <$> annexSzHash
+          then newent' annexSzHash
           else do
             key <- mkKey opt db status path
             entry_ <- getDB db dev $ fromKey key
@@ -377,7 +381,7 @@ mkEntry'' opt db now seen path status
                                     if optSHA1' opt then Just h else Nothing
                       else Nothing
          | optSLink opt || optALink opt && isJust annexSzHash -> do
-             ent <- mkEntry opt db now seen True (R.takeDirectory path </> target)
+             ent <- mkEntry opt db now seen (snd <$> annexSzHash) (R.takeDirectory path </> target)
              return $ flip fmap ent $ \e -> e { _path = path }
          | otherwise ->
              -- we compute hash conditionally as directories containing only symlinks will otherwise
@@ -394,7 +398,7 @@ mkEntry'' opt db now seen path status
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    return . Just $ Entry path mode False size du 0 Nothing
               Right files -> do
-                entries <- sequence $ mkEntry opt db now seen False . R.combine' path <$> files :: IO [Maybe Entry]
+                entries <- sequence $ mkEntry opt db now seen Nothing . R.combine' path <$> files :: IO [Maybe Entry]
                 let dir = combine (path, mode, True, du) $ catMaybes entries
                 if _sizeOK dir &&
                    -- if the above condition is true, a read error occured somewhere and the info
