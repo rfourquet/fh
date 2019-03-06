@@ -2,11 +2,12 @@
 
 module Hashing (dirCtx, getAnnexSizeAndHash, hexlify, sha1sum, sha1sumSymlink, unhexlify') where
 
-import           Control.Applicative              ((<|>))
+import           Control.Applicative              (many, (<|>))
 import           Control.Monad                    (when)
 import qualified Crypto.Hash.SHA1                 as SHA1
-import           Data.Attoparsec.ByteString       (Parser, anyWord8, count, endOfInput, inClass,
-                                                   match, parseOnly, satisfy, skipMany1, string)
+import           Data.Attoparsec.ByteString       (Parser, count, endOfInput, inClass, match,
+                                                   option, parseOnly, satisfy, skipMany1, string,
+                                                   word8)
 import           Data.Attoparsec.ByteString.Char8 (char8, decimal)
 import           Data.Bits                        (shiftL, (.|.))
 import           Data.ByteString                  (ByteString)
@@ -53,29 +54,58 @@ unhexlify' h = B.pack . fst $ B.foldr' f ([], Nothing) h
         val w = if w <= 57 then w - 48 else w - 87
 
 
-getAnnexSizeAndHash :: RawFilePath -> Maybe (Int, ByteString)
-getAnnexSizeAndHash path =
-  case parseOnly annexKeyP $ R.takeFileName path of
-    Left _               -> Nothing
-    Right (AnnexKey s h) -> Just (s, h)
+-- * Annex
+
+getAnnexSizeAndHash :: Bool -> RawFilePath -> Maybe (Int, ByteString)
+getAnnexSizeAndHash isLink path =
+    case parsed of
+      Left _                 -> Nothing
+      Right (AnnexKey s h _) -> Just (s, h)
+  where parsed = if isLink
+        then parseOnly annexLinkP path
+        else parseOnly annexFileP $ R.takeFileName path
 
 data AnnexKey = AnnexKey { _size :: Int
                          , _hash :: ByteString
+                         , _ext  :: Bool
                          } deriving Show
 
 annexKeyP :: Parser AnnexKey
 annexKeyP = do
     algo <- string "SHA1E" <|> string "SHA1"
     dash
-    char8' 's'
+    char8_ 's'
     s <- decimal
     dash >> dash
     (h, _) <- match $ count 40 hex
-    when (algo == "SHA1E") $ do
-      char8' '.'
-      skipMany1 anyWord8 -- git-annex probably allows only 3 or 4 chars as extension
-    endOfInput
-    return $ AnnexKey s $ unhexlify' h
-  where dash = char8' '-'
+    return $ AnnexKey s (unhexlify' h) (algo == "SHA1E")
+  where dash = char8_ '-'
         hex = satisfy $ inClass "0-9a-f"
-        char8' = void . char8 -- to suppress "unused-do-bind" warnings
+
+annexExtP :: AnnexKey -> Parser AnnexKey
+annexExtP key = do
+    when (_ext key) $ option () $ do
+      char8_ '.'
+      skipMany1 $ satisfy (/= R.pathSeparator) -- git-annex probably allows only 3 or 4 chars as extension
+    endOfInput
+    return key
+
+annexFileP :: Parser AnnexKey
+annexFileP = annexKeyP >>= annexExtP
+
+annexLinkP :: Parser AnnexKey
+annexLinkP = do
+    void $ many upDir
+    void $ string ".git/annex/objects/"
+    subDir >> subDir
+    (ks, key) <- match annexKeyP
+    pathSep
+    void $ string ks
+    annexExtP key
+  where upDir = string "../"
+        isAlphaNum = satisfy $ inClass "0-9a-zA-Z"
+        subDir = void $ isAlphaNum >> isAlphaNum >> pathSep
+        pathSep = void $ word8 R.pathSeparator
+
+char8_ :: Char -> Parser ()
+char8_ = void . char8

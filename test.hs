@@ -28,11 +28,17 @@ emptyBinHash = "\218\&9\163\238^kK\r2U\191\239\149`\CAN\144\175\216\a\t"
 testHashing :: TestTree
 testHashing = testGroup "Hashing tests"
     [ testCase "getAnnexSizeAndHash" $ do
-        getAnnexSizeAndHash emptySHA1Key  @?= Just (0, emptyBinHash)
-        getAnnexSizeAndHash emptySHA1EKey @?= Just (0, emptyBinHash)
-        getAnnexSizeAndHash (emptySHA1Key <> ".txt") @?= Nothing
+        let getSzHashLink = getAnnexSizeAndHash True
+        getSzHashLink emptySHA1Key  @?= Just (0, emptyBinHash)
+        getSzHashLink emptySHA1EKey @?= Just (0, emptyBinHash)
+        getSzHashLink (emptySHA1Key <> ".txt") @?= Nothing
         let Just k = B.stripSuffix "txt" emptySHA1EKey
-        getAnnexSizeAndHash k @?= Nothing
+        getSzHashLink k @?= Nothing
+        let Just k' = B.stripSuffix ".txt" emptySHA1EKey
+        getSzHashLink k' @?= Just (0, emptyBinHash)
+        -- test endOfInput
+        getSzHashLink (emptySHA1Key  <> "/more") @?= Nothing
+        getSzHashLink (emptySHA1EKey <> "/more") @?= Nothing
 
     , testCase "hexlify & unhexlify'" $ do
         hexlify emptyBinHash @?= BC.unpack emptyHexHash

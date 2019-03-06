@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module RawPath (combine, combine', getSymbolicLinkStatus, listDirectory, readFile,
+module RawPath (combine, combine', getSymbolicLinkStatus, listDirectory, pathSeparator, readFile,
                readFileLazy, readSymbolicLink, takeDirectory, takeFileName, (</>)) where
 
 import qualified Data.ByteString               as B

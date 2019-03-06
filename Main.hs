@@ -346,7 +346,7 @@ mkEntry'' opt db now seen path status
         -- DB access is not lazy so a guard is needed somewhere to avoid computing the hash
         -- we can as well avoid the getDB call in this case, as a small optimization
       then do
-        let annexSzHash = if optATrust opt then getAnnexSizeAndHash path else Nothing
+        let annexSzHash = if optATrust opt then getAnnexSizeAndHash False path else Nothing
         if isJust annexSzHash
           then newent' $ snd <$> annexSzHash
           else do
@@ -364,10 +364,10 @@ mkEntry'' opt db now seen path status
       else newent' Nothing
   | isSymbolicLink status = do
       target <- R.readSymbolicLink path
-      let annexSzHash = if optAPretend opt && ".git/annex/objects/" `B.isInfixOf` target
-                        then getAnnexSizeAndHash target
-                        else Nothing
-      if | isJust annexSzHash -> do
+      let annexSzHash = if optAPretend opt || optALink opt
+                          then getAnnexSizeAndHash True target
+                          else Nothing
+      if | optAPretend opt && isJust annexSzHash -> do
              let Just (s, h) = annexSzHash
                  key = toIntegral h `setBit` (finiteBitSize (0::FileID) - 1)
                      -- we make sure the high bit is set to reduce risk of collisions
@@ -376,7 +376,7 @@ mkEntry'' opt db now seen path status
                       then Just . Entry path regularFileMode True s (guessDU s) 1 $
                                     if optSHA1' opt then Just h else Nothing
                       else Nothing
-         | optSLink opt || optALink opt && ".git/annex/objects/" `B.isInfixOf` target -> do
+         | optSLink opt || optALink opt && isJust annexSzHash -> do
              ent <- mkEntry opt db now seen True (R.takeDirectory path </> target)
              return $ flip fmap ent $ \e -> e { _path = path }
          | otherwise ->
