@@ -49,3 +49,10 @@ test-suite test
   main-is:             test.hs
   other-modules:       Hashing, RawPath
   build-depends:       tasty, tasty-hunit
+
+benchmark bench
+  import:              deps
+  type:                exitcode-stdio-1.0
+  main-is:             bench.hs
+  other-modules:       Hashing RawPath
+  build-depends:       criterion
