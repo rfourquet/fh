@@ -40,7 +40,7 @@ common deps
 
 executable fh
   import:              deps
-  main-is:             Main.hs
+  main-is:             Fh.hs
   other-modules:       DB, Hashing, Mnt, RawPath, Stat
 
 test-suite test
