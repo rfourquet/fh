@@ -156,11 +156,9 @@ $ fh -#x DB*
 ## Specifying the paths
 
 The simplest way is to provide the paths on the command line. Programs
-like `xargs` and e.g. `find` will give quite some flexibility, but due
-to a current limitation of the code parsing the arguments, specifying
-too many paths arguments on the command line has some inefficiency.
+like `xargs` and e.g. `find` will give quite some flexibility.
 
-Moreover, there are some built-in limits as to how many arguments a
+However, there are some built-in limits as to how many arguments a
 command can have. Also, above a certain threshold, `xargs` will by
 default split the arguments and invoke the command repeatedly, which
 can have confusing results: for example when a sorting option is used, the

@@ -2,51 +2,52 @@
 
 module Fh where
 
-import           Control.Applicative       ((<|>))
-import           Control.Exception         (IOException, bracket, try)
-import           Control.Monad             (forM_, join, unless, when, (<=<))
-import           Control.Monad.Trans.Class (lift)
-import qualified Crypto.Hash.SHA1          as SHA1
-import           Data.Bits                 (Bits, bit, complement, finiteBitSize, setBit, shiftL,
-                                            shiftR, (.&.), (.|.))
-import           Data.ByteString           (ByteString)
-import qualified Data.ByteString           as B
-import qualified Data.ByteString.Char8     as BC
-import qualified Data.ByteString.UTF8      as B8
-import           Data.Char                 (ord)
-import           Data.Function             ((&))
-import           Data.Int                  (Int64)
+import           Control.Applicative         ((<|>))
+import           Control.Exception           (IOException, bracket, try)
+import           Control.Monad               (forM_, join, unless, when, (<=<))
+import           Control.Monad.Trans.Class   (lift)
+import qualified Crypto.Hash.SHA1            as SHA1
+import           Data.Bits                   (Bits, bit, complement, finiteBitSize, setBit, shiftL,
+                                              shiftR, (.&.), (.|.))
+import           Data.ByteString             (ByteString)
+import qualified Data.ByteString             as B
+import qualified Data.ByteString.Char8       as BC
+import qualified Data.ByteString.UTF8        as B8
+import           Data.Char                   (ord)
+import           Data.Function               ((&))
+import           Data.Int                    (Int64)
 import           Data.IORef
-import           Data.List                 (find, foldl', sort, sortOn)
-import           Data.Maybe                (catMaybes, fromJust, fromMaybe, isJust, isNothing)
-import           Data.Set                  (Set)
-import qualified Data.Set                  as Set
+import           Data.List                   (find, foldl', sort, sortOn)
+import           Data.Maybe                  (catMaybes, fromJust, fromMaybe, isJust, isNothing)
+import           Data.Set                    (Set)
+import qualified Data.Set                    as Set
 import           Data.Time.Clock.POSIX
-import           Options.Applicative       (Parser, ParserInfo, ReadM, argument, auto, columns,
-                                            execParserPure, flag', fullDesc, handleParseResult,
-                                            help, helper, info, long, many, metavar, option,
-                                            optional, prefs, progDesc, readerError, short, str,
-                                            strOption, switch, value)
-import qualified Streaming.Prelude         as S
-import           System.Directory          (canonicalizePath)
-import           System.Environment        (getArgs)
-import           System.FilePath           (makeRelative)
-import           System.IO                 (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
-                                            mkTextEncoding, stderr, stdin, stdout)
-import           System.Posix.ByteString   (RawFilePath)
-import           System.Posix.Files        (FileStatus, accessModes, deviceID, directoryMode,
-                                            fileID, fileMode, fileSize, intersectFileModes,
-                                            isDirectory, isRegularFile, isSymbolicLink,
-                                            modificationTimeHiRes, regularFileMode,
-                                            statusChangeTimeHiRes)
-import           System.Posix.Types        (DeviceID, FileID, FileMode)
-import           Text.Printf               (printf)
+import           Options.Applicative         (Parser, ParserInfo, ReadM, argument, auto, columns,
+                                              execParserPure, flag', fullDesc, handleParseResult,
+                                              help, helper, info, long, many, metavar, option,
+                                              optional, prefs, progDesc, readerError, short, str,
+                                              strOption, switch, value)
+import qualified Streaming.Prelude           as S
+import           System.Directory            (canonicalizePath)
+import           System.Environment          (getArgs)
+import           System.FilePath             (makeRelative)
+import           System.IO                   (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
+                                              mkTextEncoding, stderr, stdin, stdout)
+import           System.Posix.ByteString     (RawFilePath)
+import qualified System.Posix.Env.ByteString
+import           System.Posix.Files          (FileStatus, accessModes, deviceID, directoryMode,
+                                              fileID, fileMode, fileSize, intersectFileModes,
+                                              isDirectory, isRegularFile, isSymbolicLink,
+                                              modificationTimeHiRes, regularFileMode,
+                                              statusChangeTimeHiRes)
+import           System.Posix.Types          (DeviceID, FileID, FileMode)
+import           Text.Printf                 (printf)
 
 import           DB
 import           Hashing
-import           RawPath                   ((</>))
-import qualified RawPath                   as R
-import           Stat                      (fileBlockSize)
+import           RawPath                     ((</>))
+import qualified RawPath                     as R
+import           Stat                        (fileBlockSize)
 
 
 -- * Options
@@ -206,17 +207,58 @@ printHelp = putStrLn
   \ The first two are only created on demand, with --init-db P,                  \n\
   \ when P = /var/cache or e.g. P = /mnt/disk respectively.                      "
 
+-- ** command arguments pre-parsing
+
+data Arg = Switch | Option | DoubleDash | File
+           deriving (Show, Eq)
+
+shortOptions :: ByteString
+shortOptions = "RlzkI"
+
+longOptions :: [ByteString]
+longOptions = ["depth", "cache-level", "minsize", "mincount", "init-db", "files-from"]
+
+parseArg :: ByteString -> Arg
+parseArg arg
+  | B.null arg || BC.head arg /= '-' = File
+  | B.null arg'                      = File       -- "-"
+  | BC.head arg' /= '-'              =            -- single-dashed option group
+      if | B.null argO              -> Switch
+         | B.null argO'             -> Option
+         | otherwise                -> Switch     -- option argument is "glued"
+  | BC.null arg''                    = DoubleDash
+  | arg'' `elem` longOptions         = Option
+  | otherwise                        = Switch     -- switch or glued option argument
+    where arg'  = B.tail arg
+          arg'' = B.tail arg'
+          argO  = B.dropWhile (not . (`B.elem` shortOptions)) arg'
+          argO' = B.tail argO
+
+preParseArgs :: ([String], [ByteString]) -> ([String], [ByteString])
+preParseArgs = filterPath Switch
+  where
+    filterPath l (s:ss, b:bs) = if isPath then (ss', b:bs') else (s:ss', bs')
+      where (ss', bs') = filterPath n (ss, bs)
+            (isPath, n) = if
+              | l == DoubleDash -> (True,  l)
+              | l == Option     -> (False, Switch)
+              | c == File       -> (True,  c)
+              | otherwise       -> (False, c)
+            c = parseArg b
+    filterPath _ _ = ([], [])
+
 
 -- * main
-
 
 type Seen = IORef (Set (DeviceID, FileID))
 
 type FhConsumer = Options -> DB -> S.Stream (S.Of Entry) IO () -> IO ()
 
-fh :: FhConsumer -> [String] -> IO ()
-fh consumer args = do
-  opt <- handleParseResult $ execParserPure (prefs $ columns 79) options args
+fh :: FhConsumer -> [String] -> [RawFilePath] -> IO ()
+fh consumer args paths = do
+  -- paths coming from args will be UTF8-encoded
+  opt' <- handleParseResult $ execParserPure (prefs $ columns 79) options args
+  let opt = opt' { optPaths = optPaths opt' ++ paths }
   if | not . null $ optInitDB opt -> createDBDirectory $ optInitDB opt
      | optHelp opt -> printHelp
      | otherwise -> do
@@ -240,16 +282,27 @@ fh consumer args = do
                          & consumer opt db
 
 -- like fh, but returns the result as a list (no consumer fallback)
-fh' :: [String] -> IO [Entry]
-fh' args = do
+fh' :: [String] -> [RawFilePath] -> IO [Entry]
+fh' args paths = do
   list <- newIORef []
   let writeList _ _ entries = writeIORef list =<< S.toList_ entries
-  fh writeList args
+  fh writeList args paths
   readIORef list
 
 fhCLI :: IO ()
 fhCLI = do mapM_ mkTranslitEncoding [stdout, stderr, stdin]
-           fh fhPrint =<< getArgs
+           -- optparse-applicative (OA) gets [String] as input, but we want paths as RawFilePath;
+           -- it's not clear how to convert a FilePath (output of OA) into a ByteString: it would
+           -- require to get the correct encoding (i.e. the one used by GHC to convert CString to
+           -- String), and deal with invalid characters (GHC doesn't seem to loose information, i.e.
+           -- the FilePath can be used to e.g. read a file, but it's not clear how to convert back
+           -- this invalid Char back to a raw string, so that the deduced RawFilePath can be used to
+           -- access the file.
+           -- Moreover, OA is slow to parse long command lines (composed of many path arguments).
+           -- So we bypass it by extracting the paths directly as RawFilePath
+           argsS <- getArgs
+           argsB <- System.Posix.Env.ByteString.getArgs
+           uncurry (fh fhPrint) $ preParseArgs (argsS, argsB)
 
 fhPrint :: FhConsumer
 fhPrint opt db entries = do

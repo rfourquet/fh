@@ -9,8 +9,10 @@ import           System.Directory      (createDirectory, removeDirectoryRecursiv
 import           System.IO             (writeFile)
 import           Test.Tasty            (TestTree, defaultMain, testGroup, withResource)
 import           Test.Tasty.HUnit      (testCase, testCaseSteps, (@?), (@?=))
+import qualified Data.ByteString.UTF8      as B8
+import System.Process     (readProcessWithExitCode)
 
-import           Fh                    (fh', _path)
+import           Fh                    (fh', _path, preParseArgs, shortOptions, longOptions)
 import           Hashing
 import qualified RawPath               as R
 
@@ -21,6 +23,7 @@ main = defaultMain $
     [ testHashing
     , testRawPath
     , withResource mkFileTree rmFileTree testFh
+    , testOptParse
     ]
 
 
@@ -87,6 +90,9 @@ mkFileTree = do
   withCurrentDirectory testDir $ do
     createDirectory "a"
     writeFile "a/x" "x"
+    createDirectory "broken"
+    writeFile "broken/Mod\232les" ""
+    writeFile "broken/Mod\56552les" ""
   return testDir
 
 rmFileTree :: FilePath -> IO ()
@@ -102,6 +108,39 @@ testFh dir = testGroup "fh tests"
         withCurrentDirectory root $ do
           step "avoid double slash"
           forM_ [".", "./"] $ \d -> do
-             list <- fh' [d, "-R1"]
+             list <- fh' [d, "-R1"] []
              not (any ("//" `B.isInfixOf`) $ map _path list) @? "has double slash"
+
+          step "broken encoding"
+          (_, _, err) <- readProcessWithExitCode "sh" ["-c", "fh broken/*"] []
+          err @?= ""
     ]
+
+-- * option parsing
+
+preParseArgs' :: [String] -> ([String], [ByteString])
+preParseArgs' ss = preParseArgs (ss, map B8.fromString ss)
+
+testOptParse :: TestTree
+testOptParse = testCase "option parsing tests" $ do
+  shortOptions @?= "RlzkI" -- reminder to update these tests if options change
+  longOptions @?= ["depth", "cache-level", "minsize", "mincount", "init-db", "files-from"]
+  preParseArgs' []                          @?= ([], [])
+  preParseArgs' ["x"]                       @?= ([], ["x"])
+  preParseArgs' ["-"]                       @?= ([], ["-"])
+  preParseArgs' [""]                        @?= ([], [""])
+  preParseArgs' ["-x"]                      @?= (["-x"], []) -- non-exitant short option
+  preParseArgs' ["-m"]                      @?= (["-m"], [])
+  preParseArgs' ["-l1"]                     @?= (["-l1"], [])
+  preParseArgs' ["-l", "1"]                 @?= (["-l", "1"], [])
+  preParseArgs' ["-x", "1"]                 @?= (["-x"], ["1"])
+  preParseArgs' ["-l1"]                     @?= (["-l1"], [])
+  preParseArgs' ["-x1"]                     @?= (["-x1"], [])
+  preParseArgs' ["-xl1"]                    @?= (["-xl1"], [])
+  preParseArgs' ["-xl12"]                   @?= (["-xl12"], [])
+  preParseArgs' ["-lx1"]                    @?= (["-lx1"], [])
+  preParseArgs' ["-xl", "1"]                @?= (["-xl", "1"], [])
+  preParseArgs' ["-lx", "1"]                @?= (["-lx"], ["1"])
+  preParseArgs' ["--nothing", "1", "2"]     @?= (["--nothing"], ["1", "2"])
+  preParseArgs' ["--depth", "1", "2"]       @?= (["--depth", "1"], ["2"])
+  preParseArgs' ["--", "--depth", "1", "2"] @?= (["--"], ["--depth", "1", "2"])
