@@ -32,12 +32,14 @@ takeDirectory p = let dir = fst . B.breakEnd isPathSeparator $ p
 -- | Same as combine (</>) but doesn't check whether the second path starts with a path separator
 -- | (i.e. the two paths are always concatenated).
 combine' :: RawFilePath -> RawFilePath -> RawFilePath
-combine' p q = B.intercalate (B.singleton pathSeparator) [p, q]
+combine' p q | B.null p                  = q
+             | B.last p == pathSeparator = B.append p q
+             | otherwise                 = B.intercalate (B.singleton pathSeparator) [p, q]
 
 (</>), combine :: RawFilePath -> RawFilePath -> RawFilePath
-combine p q = if B.head q == pathSeparator
-                then q
-                else combine' p q
+combine p q | B.null q                  = p
+            | B.head q == pathSeparator = q
+            | otherwise                 = combine' p q
 
 (</>) = combine
 

@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+import           Control.Monad         (forM_)
 import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as BC
@@ -11,12 +12,14 @@ import           Test.Tasty.HUnit      (testCase, testCaseSteps, (@?), (@?=))
 
 import           Fh                    (fh', _path)
 import           Hashing
+import qualified RawPath               as R
 
 
 main :: IO ()
 main = defaultMain $
   testGroup "Tests"
     [ testHashing
+    , testRawPath
     , withResource mkFileTree rmFileTree testFh
     ]
 
@@ -52,6 +55,27 @@ testHashing = testGroup "Hashing tests"
     ]
 
 
+-- * RawPath
+
+testRawPath :: TestTree
+testRawPath = testCaseSteps "RawPath tests" $ \step -> do
+                step "combine'"
+                do R.combine' ""    "b"  @?= "b"
+                   R.combine' ""    "/b" @?= "/b"
+                   R.combine' "a/"  "b"  @?= "a/b"
+                   R.combine' "a//" "b"  @?= "a//b"
+                   R.combine' "a/"  "/b" @?= "a//b"
+                   R.combine' "a"   "b"  @?= "a/b"
+                   R.combine' "a"   "/b" @?= "a//b"
+                step "combine"
+                do R.combine  "a"   ""   @?= "a"
+                   R.combine  "a"   "b"  @?= "a/b"
+                   R.combine  "a/"  "b"  @?= "a/b"
+                   R.combine  "a"   "/b" @?= "/b"
+                   R.combine  "a"   ""   @?= "a"
+                   R.combine  "a"   ""   @?= "a"
+
+
 -- * file tree
 
 testDir :: FilePath
@@ -77,6 +101,7 @@ testFh dir = testGroup "fh tests"
         root <- dir
         withCurrentDirectory root $ do
           step "avoid double slash"
-          do list <- fh' [".", "-R1"]
+          forM_ [".", "./"] $ \d -> do
+             list <- fh' [d, "-R1"]
              not (any ("//" `B.isInfixOf`) $ map _path list) @? "has double slash"
     ]
