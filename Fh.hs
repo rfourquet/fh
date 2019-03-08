@@ -1,6 +1,6 @@
 {-# LANGUAGE MultiWayIf, OverloadedStrings #-}
 
-module Main where
+module Fh where
 
 import           Control.Applicative       ((<|>))
 import           Control.Exception         (IOException, bracket, try)
@@ -210,8 +210,8 @@ printHelp = putStrLn
 
 type Seen = IORef (Set (DeviceID, FileID))
 
-main :: IO ()
-main = do
+fh :: IO ()
+fh = do
   mapM_ mkTranslitEncoding [stdout, stderr, stdin]
 
   opt <- customExecParser (prefs $ columns 79) options
