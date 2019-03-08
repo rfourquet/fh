@@ -23,11 +23,13 @@ import           Data.Set                  (Set)
 import qualified Data.Set                  as Set
 import           Data.Time.Clock.POSIX
 import           Options.Applicative       (Parser, ParserInfo, ReadM, argument, auto, columns,
-                                            customExecParser, flag', fullDesc, help, helper, info,
-                                            long, many, metavar, option, optional, prefs, progDesc,
-                                            readerError, short, str, strOption, switch, value)
+                                            execParserPure, flag', fullDesc, handleParseResult,
+                                            help, helper, info, long, many, metavar, option,
+                                            optional, prefs, progDesc, readerError, short, str,
+                                            strOption, switch, value)
 import qualified Streaming.Prelude         as S
 import           System.Directory          (canonicalizePath)
+import           System.Environment        (getArgs)
 import           System.FilePath           (makeRelative)
 import           System.IO                 (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
                                             mkTextEncoding, stderr, stdin, stdout)
@@ -210,11 +212,11 @@ printHelp = putStrLn
 
 type Seen = IORef (Set (DeviceID, FileID))
 
-fh :: IO ()
-fh = do
-  mapM_ mkTranslitEncoding [stdout, stderr, stdin]
+type FhConsumer = Options -> DB -> S.Stream (S.Of Entry) IO () -> IO ()
 
-  opt <- customExecParser (prefs $ columns 79) options
+fh :: FhConsumer -> [String] -> IO ()
+fh consumer args = do
+  opt <- handleParseResult $ execParserPure (prefs $ columns 79) options args
   if | not . null $ optInitDB opt -> createDBDirectory $ optInitDB opt
      | optHelp opt -> printHelp
      | otherwise -> do
@@ -230,23 +232,30 @@ fh = do
 
          bracket newDB closeDB $ \db -> do
            when (_optHID opt > 1) $ resetHID db
-           let printEntry = putStrLn <=< showEntry opt db
 
-           let list' = optPaths' opt
-                     & S.mapM (uncurry $ mkEntry' opt db now seen Nothing)
-                     & S.catMaybes
-                     & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
-                                         optMinCnt opt <= _cnt ent)
+           optPaths' opt & S.mapM (uncurry $ mkEntry' opt db now seen Nothing)
+                         & S.catMaybes
+                         & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
+                                             optMinCnt opt <= _cnt ent)
+                         & consumer opt db
 
-           list <- S.toList_ $ if optSortS opt || optSortD opt || optSortCnt opt
-                                 then list'
-                                 else S.chain printEntry list'
+fhCLI :: IO ()
+fhCLI = do mapM_ mkTranslitEncoding [stdout, stderr, stdin]
+           fh fhPrint =<< getArgs
 
-           when (optSortS opt)   $ forM_ (sortOn _size list) printEntry
-           when (optSortD opt)   $ forM_ (sortOn _du   list) printEntry
-           when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
-           when (optTotal opt) $
-             printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0) list
+fhPrint :: FhConsumer
+fhPrint opt db entries = do
+  let printEntry = putStrLn <=< showEntry opt db
+
+  list <- S.toList_ $ if optSortS opt || optSortD opt || optSortCnt opt
+                        then entries
+                        else S.chain printEntry entries
+
+  when (optSortS opt)   $ forM_ (sortOn _size list) printEntry
+  when (optSortD opt)   $ forM_ (sortOn _du   list) printEntry
+  when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
+  when (optTotal opt) $
+    printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0) list
 
 
 -- recursively yield paths within directories up to a fixed depth

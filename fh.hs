@@ -1,4 +1,4 @@
-import Fh (fh)
+import Fh (fhCLI)
 
 main :: IO ()
-main = fh
+main = fhCLI
