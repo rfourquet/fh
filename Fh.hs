@@ -239,6 +239,14 @@ fh consumer args = do
                                              optMinCnt opt <= _cnt ent)
                          & consumer opt db
 
+-- like fh, but returns the result as a list (no consumer fallback)
+fh' :: [String] -> IO [Entry]
+fh' args = do
+  list <- newIORef []
+  let writeList _ _ entries = writeIORef list =<< S.toList_ entries
+  fh writeList args
+  readIORef list
+
 fhCLI :: IO ()
 fhCLI = do mapM_ mkTranslitEncoding [stdout, stderr, stdin]
            fh fhPrint =<< getArgs

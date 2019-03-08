@@ -3,15 +3,21 @@
 import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as BC
-import           Test.Tasty            (TestTree, defaultMain, testGroup)
-import           Test.Tasty.HUnit      (testCase, (@?=))
+import           System.Directory      (createDirectory, removeDirectoryRecursive,
+                                        withCurrentDirectory)
+import           System.IO             (writeFile)
+import           Test.Tasty            (TestTree, defaultMain, testGroup, withResource)
+import           Test.Tasty.HUnit      (testCase, testCaseSteps, (@?), (@?=))
 
+import           Fh                    (fh', _path)
 import           Hashing
+
 
 main :: IO ()
 main = defaultMain $
   testGroup "Tests"
     [ testHashing
+    , withResource mkFileTree rmFileTree testFh
     ]
 
 
@@ -43,4 +49,34 @@ testHashing = testGroup "Hashing tests"
     , testCase "hexlify & unhexlify'" $ do
         hexlify emptyBinHash @?= BC.unpack emptyHexHash
         unhexlify' emptyHexHash @?= emptyBinHash
+    ]
+
+
+-- * file tree
+
+testDir :: FilePath
+testDir = "test-dir-t9pBD7EPYM"
+
+mkFileTree :: IO FilePath
+mkFileTree = do
+  createDirectory testDir
+  withCurrentDirectory testDir $ do
+    createDirectory "a"
+    writeFile "a/x" "x"
+  return testDir
+
+rmFileTree :: FilePath -> IO ()
+rmFileTree = removeDirectoryRecursive
+
+
+-- * fh
+
+testFh :: IO FilePath -> TestTree
+testFh dir = testGroup "fh tests"
+    [ testCaseSteps "paths" $ \step -> do
+        root <- dir
+        withCurrentDirectory root $ do
+          step "avoid double slash"
+          do list <- fh' [".", "-R1"]
+             not (any ("//" `B.isInfixOf`) $ map _path list) @? "has double slash"
     ]
