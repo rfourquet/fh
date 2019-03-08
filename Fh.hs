@@ -4,7 +4,7 @@ module Fh where
 
 import           Control.Applicative       ((<|>))
 import           Control.Exception         (IOException, bracket, try)
-import           Control.Monad             (forM_, join, unless, when)
+import           Control.Monad             (forM_, join, unless, when, (<=<))
 import           Control.Monad.Trans.Class (lift)
 import qualified Crypto.Hash.SHA1          as SHA1
 import           Data.Bits                 (Bits, bit, complement, finiteBitSize, setBit, shiftL,
@@ -230,12 +230,7 @@ fh = do
 
          bracket newDB closeDB $ \db -> do
            when (_optHID opt > 1) $ resetHID db
-
-           let printEntry ent = do
-                 hid <- if optHID opt
-                          then sequence $ getHID' db <$> _hash ent
-                          else return Nothing
-                 putStrLn . showEntry opt hid $ ent
+           let printEntry = putStrLn <=< showEntry opt db
 
            let list' = optPaths' opt
                      & S.mapM (uncurry $ mkEntry' opt db now seen Nothing)
@@ -510,10 +505,16 @@ fromRawString s = B.pack . concat $ charToBytes . ord <$> s
 
 -- * display
 
+showEntry :: Options -> DB -> Entry -> IO String
+showEntry opt db ent = showEntry' opt ent <$>
+  if optHID opt
+    then sequence $ getHID' db <$> _hash ent
+    else return Nothing
+
 -- TODO: decode via UTF8 only when interactive (stdout is a tty)
 -- TODO: use system encoding instead of hardcoded UTF8
-showEntry :: Options -> Maybe Int64 -> Entry -> String
-showEntry opt hid ent@(Entry path' _ _ size du cnt hash) =
+showEntry' :: Options -> Entry -> Maybe Int64 -> String
+showEntry' opt ent@(Entry path' _ _ size du cnt hash) hid =
   let path  = B8.toString path'
       np    = if optCnt opt then
                 if isDir ent then printf "%14s" ("("++ show cnt ++ ")  ") ++ path
