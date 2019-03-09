@@ -584,20 +584,18 @@ showEntry opt db ent = showEntry' opt ent <$>
 -- TODO: decode via UTF8 only when interactive (stdout is a tty)
 -- TODO: use system encoding instead of hardcoded UTF8
 showEntry' :: Options -> Entry -> Maybe Int64 -> String
-showEntry' opt ent@(Entry path' _ _ size du cnt hash) hid =
-  let path  = B8.toString path'
-      np    = if optCnt opt then
-                if isDir ent then printf "%14s" ("("++ show cnt ++ ")  ") ++ path
-                             else "              " ++ path
-                else path
-      snp   = if optSize opt then formatSize opt size ++ "  " ++ np               else np
-      dsnp  = if optDU opt then formatSize opt du ++ "  " ++ snp                  else snp
-      hdsnp = if optSHA1 opt -- if hash is still Nothing, there was an I/O error
-                then maybe (replicate 40 '*') hexlify hash ++ "  " ++ dsnp        else dsnp
-      in      if optHID opt
-                then let s = "#" ++ maybe "*" show hid
-                     in printf "%5s  " s ++ hdsnp
-                else hdsnp
+showEntry' opt ent@(Entry path' _ _ size du cnt hash) hid = mconcat
+  [ if optHID opt then printf "%5s  " $ "#" ++ maybe "*" show hid else ""
+  , if optSHA1 opt -- if hash is still Nothing, there was an I/O error
+      then maybe (replicate 40 '*') hexlify hash ++ "  "          else ""
+  , if optDU opt then formatSize opt du ++ "  "                   else ""
+  , if optSize opt then formatSize opt size ++ "  "               else ""
+  , if optCnt opt then
+      if isDir ent then printf "%14s" ("("++ show cnt ++ ")  ")
+                   else "              "
+                                                                  else ""
+  , B8.toString path'
+  ]
 
 formatSize :: Options -> Int -> String
 formatSize opt sI =
