@@ -5,8 +5,8 @@ import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.UTF8  as B8
-import           System.Directory      (createDirectory, removeDirectoryRecursive,
-                                        withCurrentDirectory)
+import           System.Directory      (createDirectory, createDirectoryIfMissing,
+                                        removeDirectoryRecursive, withCurrentDirectory)
 import           System.IO             (writeFile)
 import           System.Process        (readProcessWithExitCode)
 import           Test.Tasty            (TestTree, defaultMain, testGroup, withResource)
@@ -120,9 +120,10 @@ testFh dir = testGroup "fh tests"
           step "broken encoding"
           (_, _, err) <- readProcessWithExitCode "sh" ["-c", "fh broken/*"] []
           err @?= ""
-    , testCase "fh'" $ do
+    , testCaseSteps "fh'" $ \step -> do
         root <- dir
         withCurrentDirectory root $ do
+          step "sorting"
           r1 <- fh'' ["-s", "a/y", "a/x"]
           map _size r1 @?= [2, 1]
           r2 <- fh'' ["-sS", "a/y", "a/x"]
@@ -130,6 +131,14 @@ testFh dir = testGroup "fh tests"
           r3 <- fh'' ["-sSc", "a/y", "a/x"]
           map _size r3 @?= [3, 1, 2]
           map _path r3 @?= ["*total*", "a/x", "a/y"]
+
+          step "no-update-db"
+          createDirectoryIfMissing True "no-update/db"
+          n1 <- fh'' ["--no-update-db", "-s", "no-update/"]
+          map _size n1 @?= [0]
+          writeFile "no-update/db/x" "x"
+          n2 <- fh'' ["--no-update-db", "-s", "-l2", "no-update/"]
+          map _size n2 @?= [1] -- actualized as there was no cache
     ]
 
 -- * option parsing

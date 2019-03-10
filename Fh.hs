@@ -78,6 +78,7 @@ data Options = Options { optHelp     :: Bool
                        , optSortCnt  :: Bool
                        , optNoGit    :: Bool
                        , optOptimS   :: Bool
+                       , optNoUpdDB  :: Bool
                        , optInitDB   :: FilePath
                        , optInput    :: Maybe FilePath  -- file containing paths to report
                        , optPaths    :: [RawFilePath]
@@ -162,6 +163,7 @@ parserOptions = Options
                             help "ignore \".git\" filenames passed on the command line")
                 <*> switch (long "optimize-space" <> short 'O' <>
                             help "don't store in DB fast to compute entries")
+                <*> switch (long "no-update-db") -- help "don't update the DB"
                 <*> strOption (long "init-db" <> metavar "PATH" <> value "" <>
                                help "create a DB directory at PATH and exit")
                 <*> optional (strOption (long "files-from" <> short 'I' <> metavar "FILE" <>
@@ -417,11 +419,13 @@ mkEntry'' opt db now seen mHash path status
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    newent' Nothing
               Right h        -> do
-                if optOptimS opt && du <= 4096
-                  -- quite arbitrary threshold: smaller values don't change performance much: there
-                  -- is always significant overhead for having to read file content at all
-                  then when exists $ deleteDB db dev $ fromKey key
-                  else let put = if exists then updateDB else insertDB
+                if | optNoUpdDB opt -> return ()
+                   | optOptimS opt && du <= 4096
+                     -- quite arbitrary threshold: smaller values don't change performance much: there
+                     -- is always significant overhead for having to read file content at all
+                               -> when exists $ deleteDB db dev $ fromKey key
+                   | otherwise ->
+                       let put = if exists then updateDB else insertDB
                        in  put db dev $ mkDBEntry (key, now, size, du, 1, h)
                 newent' $ Just h
       if optSHA1' opt
@@ -476,14 +480,14 @@ mkEntry'' opt db now seen mHash path status
               Right files -> do
                 entries <- sequence $ mkEntry opt db now seen Nothing . R.combine' path <$> files :: IO [Maybe Entry]
                 let dir = combine (path, mode, True, du) $ catMaybes entries
-                if _sizeOK dir &&
-                   -- if the above condition is true, a read error occured somewhere and the info
-                   -- can't reliably be stored into the DB
-                   not (optOptimS opt && (null files || null (tail files))) -- don't store dirs of length <= 1
-                  then
-                    let put = if exists then updateDB else insertDB
-                    in  put db dev $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe B.empty (_hash dir))
-                  else when exists $ deleteDB db dev $ fromKey key
+                if | optNoUpdDB opt -> return ()
+                   | not (_sizeOK dir) ||
+                     -- in the above condition, a read error occured somewhere and the info
+                     -- can't reliably be stored into the DB
+                     optOptimS opt && (null files || null (tail files)) -- don't store dirs of length <= 1
+                               -> when exists $ deleteDB db dev $ fromKey key
+                   | otherwise -> let put = if exists then updateDB else insertDB
+                                  in  put db dev $ mkDBEntry (key, now, _size dir, _du dir, _cnt dir, fromMaybe B.empty (_hash dir))
                 return . Just $ dir
       entry_ <- getDB db dev $ fromKey key
       case entry_ of
