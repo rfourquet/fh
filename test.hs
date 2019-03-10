@@ -132,6 +132,23 @@ testFh dir = testGroup "fh tests"
           map _size r3 @?= [3, 1, 2]
           map _path r3 @?= ["*total*", "a/x", "a/y"]
 
+          step "cache level"
+          createDirectoryIfMissing True "cache/level"
+          m1 <- fh'' ["-s", "cache"]
+          map _size m1 @?= [0]
+          writeFile "cache/level/x" "x"
+          m2 <- fh'' ["-s", "-l2", "cache"]
+          map _size m2 @?= [0]
+          m3 <- fh'' ["-s", "cache"] -- default cache level: 2
+          map _size m3 @?= [0]
+          m4 <- fh'' ["-s", "-l1", "cache"]
+          map _size m4 @?= [1]
+          writeFile "cache/x" "x"
+          m5 <- fh'' ["-s", "-l3", "cache"]
+          map _size m5 @?= [1]
+          m6 <- fh'' ["-s", "-l2", "cache"]
+          map _size m6 @?= [2]
+
           step "no-update-db"
           createDirectoryIfMissing True "no-update/db"
           n1 <- fh'' ["--no-update-db", "-s", "no-update/"]
