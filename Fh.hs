@@ -4,7 +4,7 @@ module Fh where
 
 import           Control.Applicative         ((<|>))
 import           Control.Exception           (IOException, bracket, try)
-import           Control.Monad               (forM_, join, unless, when, (<=<))
+import           Control.Monad               (forM_, join, unless, when, (<=<), (>=>))
 import           Control.Monad.Trans.Class   (lift)
 import qualified Crypto.Hash.SHA1            as SHA1
 import           Data.Bits                   (Bits, bit, complement, finiteBitSize, setBit, shiftL,
@@ -52,36 +52,37 @@ import           Stat                        (fileBlockSize)
 
 -- * Options
 
-data Options = Options { optHelp     :: Bool
+data Options = Options { optHelp      :: Bool
 
-                       , _optSHA1    :: Bool
-                       , _optHID     :: Int
-                       , _optSize    :: Bool
-                       , optDU       :: Bool
-                       , optCnt      :: Bool
-                       , optTotal    :: Bool
+                       , _optSHA1     :: Bool
+                       , _optHID      :: Int
+                       , _optSize     :: Bool
+                       , optDU        :: Bool
+                       , optCnt       :: Bool
+                       , optTotal     :: Bool
 
-                       , optDepth    :: Int
-                       , _optCLevel  :: CacheLevel
-                       , optMtime    :: Bool
-                       , optSLink    :: Bool
-                       , optALink    :: Bool
-                       , optUnique   :: Bool
-                       , optATrust   :: Bool
-                       , optAPretend :: Bool
-                       , optUseModes :: Bool
-                       , optSI       :: Bool
-                       , optMinSize  :: Int
-                       , optMinCnt   :: Int
-                       , _optSortS   :: Bool
-                       , _optSortD   :: Bool
-                       , optSortCnt  :: Bool
-                       , optNoGit    :: Bool
-                       , optOptimS   :: Bool
-                       , optNoUpdDB  :: Bool
-                       , optInitDB   :: FilePath
-                       , optInput    :: Maybe FilePath  -- file containing paths to report
-                       , optPaths    :: [RawFilePath]
+                       , optDepth     :: Int
+                       , _optCLevel   :: CacheLevel
+                       , optMtime     :: Bool
+                       , optSLink     :: Bool
+                       , optALink     :: Bool
+                       , optUnique    :: Bool
+                       , optATrust    :: Bool
+                       , optAPretend  :: Bool
+                       , optUseModes  :: Bool
+                       , optSI        :: Bool
+                       , optMinSize   :: Int
+                       , optMinCnt    :: Int
+                       , _optSortS    :: Bool
+                       , _optSortD    :: Bool
+                       , optSortCnt   :: Bool
+                       , optSortFirst :: Bool
+                       , optNoGit     :: Bool
+                       , optOptimS    :: Bool
+                       , optNoUpdDB   :: Bool
+                       , optInitDB    :: FilePath
+                       , optInput     :: Maybe FilePath  -- file containing paths to report
+                       , optPaths     :: [RawFilePath]
                        }
 
 optOutUnspecified :: Options -> Bool
@@ -159,6 +160,8 @@ parserOptions = Options
                             help "sort output, according to disk usage")
                 <*> switch (long "sort-count" <> short 'N' <>
                             help "sort output, according to count")
+                <*> switch (long "sort-first" <> short 'q' <>
+                            help "sort before computing the hashes & applying unique")
                 <*> switch (long "ignore-git" <> short 'G' <>
                             help "ignore \".git\" filenames passed on the command line")
                 <*> switch (long "optimize-space" <> short 'O' <>
@@ -279,11 +282,28 @@ fh consumer args paths = do
          bracket newDB closeDB $ \db -> do
            when (_optHID opt > 1) $ resetHID db
 
-           optPaths' opt & S.mapM (uncurry $ mkEntry' opt db now seen Nothing)
-                         & S.catMaybes
-                         & S.filter (\ent -> optMinSize opt * 1024 * 1024 <= _size ent &&
-                                             optMinCnt opt <= _cnt ent)
-                         & consumer opt db
+           let go o = optPaths' opt
+                    & S.mapM (uncurry $ mkEntry' o db now seen Nothing)
+                    & S.catMaybes
+               finalize o = consumer o db .
+                            S.filter (\ent -> optMinSize o * 1024 * 1024 <= _size ent &&
+                                                             optMinCnt o <= _cnt ent)
+
+           if optSortFirst opt && optSortAny opt && (optSHA1' opt || optUnique opt)
+             then go (opt { _optSHA1   = False
+                          , _optHID    = 0
+                          ,  optUnique = False
+                          , _optCLevel = optCLevel opt -- clevel -1 is sensible to hashing & unique, which are disabled here
+                          })
+                & S.toList_
+                & fmap (sortEntries opt)
+                & fmap (map _path)
+                & (lift >=> S.each)
+                & S.mapM (mkEntry opt db now seen Nothing) -- previous status info has been discarded
+                & S.catMaybes -- there should be only `Just` entries
+                & finalize (opt { _optSortS = False, _optSortD = False, optSortCnt = False })
+             else go opt
+                & finalize opt
 
 sortEntries :: Options -> [Entry] -> [Entry]
 sortEntries opt list

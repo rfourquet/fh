@@ -32,8 +32,9 @@ Usage: fh [-?|--long-help] [-x|--sha1] [-#|--hid] [-s|--size] [-d|--disk-usage]
           [-m|--mtime] [-L|--dereference] [-A|--deref-annex] [-u|--unique]
           [-X|--trust-annex] [-P|--pretend-annex] [-M|--use-modes] [-t|--si]
           [-z|--minsize INT] [-k|--mincount INT] [-S|--sort] [-D|--sort-du]
-          [-N|--sort-count] [-G|--ignore-git] [-O|--optimize-space]
-          [--init-db PATH] [-I|--files-from FILE] [PATHS...]
+          [-N|--sort-count] [-q|--sort-first] [-G|--ignore-git]
+          [-O|--optimize-space] [--no-update-db] [--init-db PATH]
+          [-I|--files-from FILE] [PATHS...]
   compute and cache the sha1 hash and size of files and directories
 
 Available options:
@@ -61,6 +62,7 @@ Available options:
   -S,--sort                sort output, according to size
   -D,--sort-du             sort output, according to disk usage
   -N,--sort-count          sort output, according to count
+  -q,--sort-first          sort before computing the hashes & applying unique
   -G,--ignore-git          ignore ".git" filenames passed on the command line
   -O,--optimize-space      don't store in DB fast to compute entries
   --init-db PATH           create a DB directory at PATH and exit
@@ -216,6 +218,54 @@ being recorded in the DB. It's possible to shrink the DB by using this
 option against a set of paths which have already been recorded (note
 that the size of the DB file may not appear to decrease: the DB needs
 to be "compacted" for the effect to be visible immediately).
+
+## Experimental feature
+
+The `--sort-first` option has two main use cases. It applies the
+specified sort before computing the hashes and before applying the
+`--unique` option. It's currently implemented by running two passes.
+
+For the "hash" case, the benefit is in terms of UI: it allows `fh` to
+start printing results (in sorted order) before all the hashes have
+been computed (in contrast, the default consists in computing
+everything before sorting and printing).
+
+For the "unique" case, it's rather subtle, and the feature may be
+disabled in the future. The result of a run with `--unique` is
+sensible to the order of the input, so sorting before applying this
+option will (in general) lead to different results. Let's see an
+example:
+
+```
+$ mkdir a a/b
+$ echo xx > a/b/x
+$ echo y > a/y
+$ fh -R3 -sS
+  2     ./a/y
+  3     ./a/b/x
+  3     ./a/b
+  5     ./a
+  5     .
+$ fh -sS a/ a/b/      # (1)
+  3     a/b/
+  5     a/
+$ fh -sS a/ a/b/ -u   # (2)
+  5     a/
+$ fh -sS a/ a/b/ -uq  # (3)
+  3     a/b/
+  2     a/
+```
+
+In step (2), as `a/` is passed before `a/b/` on the command line, with
+the `-u` switch active, the content of entry `a/b/` (i.e. `x`) is
+discarded, and only `a/` is printed. On the other hand, with `-uq` in
+step (3), sorting is applied first without `-u` (like in step (1)),
+and then `-u` is applied: as `a/b/` is now listed first, it's content
+from the `a/` entry which will be discarded by `-u`: the repeated
+`a/b`. Note in particular that the output in (3) doesn't seem sorted:
+what it means is that the size of `a/` is greater than that of `a/b/`
+(so in this respect, the output is sorted), but only two bytes are
+contained in `a/` (i.e. `y`) which are not also in `a/b/`.
 
 ## Compatibility and dependency
 

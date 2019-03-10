@@ -132,6 +132,17 @@ testFh dir = testGroup "fh tests"
           map _size r3 @?= [3, 1, 2]
           map _path r3 @?= ["*total*", "a/x", "a/y"]
 
+          step "sort-first"
+          createDirectoryIfMissing True "first/a/b"
+          writeFile "first/a/b/x" "xxx"
+          writeFile "first/a/y" "yy"
+          f1 <- fh'' ["-sS", "first/a/", "first/a/b/"]
+          map _size f1 @?= [3, 5]
+          f2 <- fh'' ["-sS", "-u", "first/a/", "first/a/b/"]
+          map _size f2 @?= [5]
+          f3 <- fh'' ["-sS", "-uq", "first/a/", "first/a/b/"]
+          map _size f3 @?= [3, 2] -- cf. README.md
+
           step "cache level"
           createDirectoryIfMissing True "cache/level"
           m1 <- fh'' ["-s", "cache"]
