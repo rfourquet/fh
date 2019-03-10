@@ -98,9 +98,11 @@ optHID = (> 0) . _optHID
 optSize :: Options -> Bool
 optSize opt = optOutUnspecified opt || _optSize opt
 
-optSortS, optSortD :: Options -> Bool
+optSortS, optSortD, optSortAny :: Options -> Bool
 optSortS opt = _optSortS opt && not (optSortCnt opt || _optSortD opt)
 optSortD opt = _optSortD opt && not (optSortCnt opt)
+
+optSortAny opt = _optSortS opt || _optSortD opt || optSortCnt opt
 
 optCLevel :: Options -> CacheLevel
 optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
@@ -281,13 +283,28 @@ fh consumer args paths = do
                                              optMinCnt opt <= _cnt ent)
                          & consumer opt db
 
+sortEntries :: Options -> [Entry] -> [Entry]
+sortEntries opt list
+  | optSortS   opt = sortOn _size list
+  | optSortD   opt = sortOn _du   list
+  | optSortCnt opt = sortOn (\e -> if isDir e then _cnt e else -1) list
+  | otherwise      = list
+
+getTotal :: [Entry] -> Entry
+getTotal = combine ("*total*", fromIntegral directoryMode, True, 0)
+
 -- like fh, but returns the result as a list (no consumer fallback)
+-- if total is requested, it's put at the *head* of the list
 fh' :: [String] -> [RawFilePath] -> IO [Entry]
 fh' args paths = do
-  list <- newIORef []
-  let writeList _ _ entries = writeIORef list =<< S.toList_ entries
+  opt_list <- newIORef (Nothing, [])
+  let writeList opt _ entries = do
+      l <- S.toList_ entries
+      writeIORef opt_list (Just opt, l)
   fh writeList args paths
-  readIORef list
+  (Just opt, list) <- readIORef opt_list
+  let sorted = sortEntries opt list
+  return $ if optTotal opt then getTotal sorted:sorted else sorted
 
 fhCLI :: IO ()
 fhCLI = do mapM_ mkTranslitEncoding [stdout, stderr, stdin]
@@ -308,15 +325,13 @@ fhPrint :: FhConsumer
 fhPrint opt db entries = do
   let printEntry = putStrLn <=< showEntry opt db
 
-  list <- S.toList_ $ if optSortS opt || optSortD opt || optSortCnt opt
+  list <- S.toList_ $ if optSortAny opt
                         then entries
                         else S.chain printEntry entries
 
-  when (optSortS opt)   $ forM_ (sortOn _size list) printEntry
-  when (optSortD opt)   $ forM_ (sortOn _du   list) printEntry
-  when (optSortCnt opt) $ forM_ (sortOn (\e -> if isDir e then _cnt e else -1) list) printEntry
+  when (optSortAny opt) $ forM_ (sortEntries opt list) printEntry
   when (optTotal opt) $
-    printEntry $ combine ("*total*", fromIntegral directoryMode, True, 0) list
+    printEntry $ getTotal list
 
 
 -- recursively yield paths within directories up to a fixed depth

@@ -4,15 +4,16 @@ import           Control.Monad         (forM_)
 import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as BC
+import qualified Data.ByteString.UTF8  as B8
 import           System.Directory      (createDirectory, removeDirectoryRecursive,
                                         withCurrentDirectory)
 import           System.IO             (writeFile)
+import           System.Process        (readProcessWithExitCode)
 import           Test.Tasty            (TestTree, defaultMain, testGroup, withResource)
 import           Test.Tasty.HUnit      (testCase, testCaseSteps, (@?), (@?=))
-import qualified Data.ByteString.UTF8      as B8
-import System.Process     (readProcessWithExitCode)
 
-import           Fh                    (fh', _path, preParseArgs, shortOptions, longOptions)
+import           Fh                    (Entry, fh', longOptions, preParseArgs, shortOptions, _path,
+                                        _size)
 import           Hashing
 import qualified RawPath               as R
 
@@ -90,6 +91,7 @@ mkFileTree = do
   withCurrentDirectory testDir $ do
     createDirectory "a"
     writeFile "a/x" "x"
+    writeFile "a/y" "yy"
     createDirectory "broken"
     writeFile "broken/Mod\232les" ""
     writeFile "broken/Mod\56552les" ""
@@ -101,6 +103,10 @@ rmFileTree = removeDirectoryRecursive
 
 -- * fh
 
+-- UTF8 encoding is applied to the paths in args
+fh'' :: [String] -> IO [Entry]
+fh'' = flip fh' []
+
 testFh :: IO FilePath -> TestTree
 testFh dir = testGroup "fh tests"
     [ testCaseSteps "paths" $ \step -> do
@@ -108,12 +114,22 @@ testFh dir = testGroup "fh tests"
         withCurrentDirectory root $ do
           step "avoid double slash"
           forM_ [".", "./"] $ \d -> do
-             list <- fh' [d, "-R1"] []
+             list <- fh'' [d, "-R1"]
              not (any ("//" `B.isInfixOf`) $ map _path list) @? "has double slash"
 
           step "broken encoding"
           (_, _, err) <- readProcessWithExitCode "sh" ["-c", "fh broken/*"] []
           err @?= ""
+    , testCase "fh'" $ do
+        root <- dir
+        withCurrentDirectory root $ do
+          r1 <- fh'' ["-s", "a/y", "a/x"]
+          map _size r1 @?= [2, 1]
+          r2 <- fh'' ["-sS", "a/y", "a/x"]
+          map _size r2 @?= [1, 2]
+          r3 <- fh'' ["-sSc", "a/y", "a/x"]
+          map _size r3 @?= [3, 1, 2]
+          map _path r3 @?= ["*total*", "a/x", "a/y"]
     ]
 
 -- * option parsing
