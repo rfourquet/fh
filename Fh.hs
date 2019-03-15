@@ -1,4 +1,4 @@
-{-# LANGUAGE MultiWayIf, OverloadedStrings #-}
+{-# LANGUAGE BangPatterns, MultiWayIf, OverloadedStrings #-}
 
 module Fh where
 
@@ -438,7 +438,9 @@ mkEntry'' opt db now seen mHash path status
             case h' of
               Left exception -> do hPutStrLn stderr $ "error: " ++ show exception
                                    newent' Nothing
-              Right h        -> do
+              Right !h       -> do -- sha1sum above reads files lazily; when (optNoUpdDB opt),
+                                   -- evaluation of h must be forced in order to avoid too many open
+                                   -- files (otherwise, writing to the DB takes care of that)
                 if | optNoUpdDB opt -> return ()
                    | optOptimS opt && du <= 4096
                      -- quite arbitrary threshold: smaller values don't change performance much: there
