@@ -23,12 +23,13 @@ import           Data.Set                    (Set)
 import qualified Data.Set                    as Set
 import           Data.Time.Clock.POSIX
 import           Options.Applicative         (Parser, ParserInfo, ReadM, argument, auto, columns,
+                                              eitherReader,
                                               execParserPure, flag', fullDesc, handleParseResult,
                                               help, helper, info, long, many, metavar, option,
                                               optional, prefs, progDesc, readerError, short, str,
                                               strOption, switch, value)
 import qualified Streaming.Prelude           as S
-import           System.Directory            (canonicalizePath)
+import           System.Directory            (canonicalizePath, findExecutable)
 import           System.Environment          (getArgs)
 import           System.FilePath             (makeRelative)
 import           System.IO                   (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
@@ -40,7 +41,10 @@ import           System.Posix.Files          (FileStatus, accessModes, deviceID,
                                               isDirectory, isRegularFile, isSymbolicLink,
                                               modificationTimeHiRes, regularFileMode,
                                               statusChangeTimeHiRes)
+import           System.Posix.IO             (stdOutput)
+import           System.Posix.Terminal       (queryTerminal)
 import           System.Posix.Types          (DeviceID, FileID, FileMode)
+import           System.Process              (readProcess)
 import           Text.Printf                 (printf)
 
 import           DB
@@ -77,6 +81,7 @@ data Options = Options { optHelp      :: Bool
                        , _optSortD    :: Bool
                        , optSortCnt   :: Bool
                        , optSortFirst :: Bool
+                       , optColor     :: ColorWhen
                        , optNoGit     :: Bool
                        , optOptimS    :: Bool
                        , optNoUpdDB   :: Bool
@@ -114,7 +119,7 @@ optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
 parserOptions :: Parser Options
 parserOptions = Options
                 <$> switch (long "long-help" <> short '?' <>
-                            help "show help for --cache-level and --init-db options")
+                            help "show help for --cache-level, --color, and --init-db options")
                 <*> switch (long "sha1" <> short 'x' <>
                             help "print sha1 hash (in hexadecimal)")
                 <*> (length <$> many (flag' () $
@@ -162,6 +167,8 @@ parserOptions = Options
                             help "sort output, according to count")
                 <*> switch (long "sort-first" <> short 'q' <>
                             help "sort before computing the hashes & applying unique")
+                <*> option colorWhen (long "color" <> value Auto <> metavar "{yes|no|auto}" <>
+                                      help "whether to colorize the output according to $LS_COLORS")
                 <*> switch (long "ignore-git" <> short 'G' <>
                             help "ignore \".git\" filenames passed on the command line")
                 <*> switch (long "optimize-space" <> short 'O' <>
@@ -188,6 +195,15 @@ clevel = do
     then return i
     else readerError "cache level isn't in the range 0..3"
 
+data ColorWhen = Always | Never | Auto
+
+colorWhen :: ReadM ColorWhen
+colorWhen = eitherReader $ \color ->
+  if | color == "yes"  -> Right Always
+     | color == "no"   -> Right Never
+     | color == "auto" -> Right Auto
+     | otherwise       -> Left "invalid option (must be \"yes\", \"no\", or \"auto\")"
+
 printHelp :: IO ()
 printHelp = putStrLn
   " --cache-level L: the cache (hash and size) is used if:                       \n\
@@ -204,6 +220,12 @@ printHelp = putStrLn
   \       confusing results with L = 2), and                                     \n\
   \   * 2 when only the size is requested (this avoids to recursively traverse   \n\
   \       directories, which would then be no better than du).                   \n\
+  \\n\
+  \ --color {yes|no|auto}: specify when to colorize paths like `ls` ($LS_COLORS):\n\
+  \   * yes: always                                                              \n\
+  \   * no: never                                                                \n\
+  \   * auto: only when the terminal is connected to a tty, and the `lscolors`   \n\
+  \           program is found in $PATH                                          \n\
   \\n\
   \ --init-db P: three locations are checked for the database directory,         \n\
   \ in this order:                                                               \n\
@@ -223,7 +245,7 @@ shortOptions :: ByteString
 shortOptions = "RlzkI"
 
 longOptions :: [ByteString]
-longOptions = ["depth", "cache-level", "minsize", "mincount", "init-db", "files-from"]
+longOptions = ["depth", "cache-level", "minsize", "mincount", "color", "init-db", "files-from"]
 
 parseArg :: ByteString -> Arg
 parseArg arg
@@ -345,7 +367,7 @@ fhCLI = do mapM_ mkTranslitEncoding [stdout, stderr, stdin]
 
 fhPrint :: FhConsumer
 fhPrint opt db entries = do
-  let printEntry = putStrLn <=< showEntry opt db
+  let printEntry = putStr <=< showEntry opt db
 
   list <- S.toList_ $ if optSortAny opt
                         then entries
@@ -617,15 +639,30 @@ fromRawString s = B.pack . concat $ charToBytes . ord <$> s
 -- * display
 
 showEntry :: Options -> DB -> Entry -> IO String
-showEntry opt db ent = showEntry' opt ent <$>
-  if optHID opt
-    then sequence $ getHID' db <$> _hash ent
-    else return Nothing
+showEntry opt db ent = do
+  -- TODO: check istty only once in a run, and try to keep one instance of `lscolors`
+  --       running, and re-use it for coloring all entries, it might make the whole
+  --       thing faster (using colors is currently significantly slower)
+  useColor <- case optColor opt of
+    Always -> return True
+    Never  -> return False
+    Auto   -> do
+      istty <- queryTerminal stdOutput
+      lscolors <- findExecutable "lscolors"
+      return $ istty && isJust lscolors
+  let path' = B8.toString (_path ent) ++ "\n" -- lscolors needs trailing '\n'
+  colored <- if useColor
+             -- TODO: catch possible exceptions thrown from this readProcess
+             then readProcess "lscolors" [] path'
+             else return path'
+  showEntry' opt ent colored <$>
+    if optHID opt then sequence $ getHID' db <$> _hash ent
+                  else return Nothing
 
 -- TODO: decode via UTF8 only when interactive (stdout is a tty)
 -- TODO: use system encoding instead of hardcoded UTF8
-showEntry' :: Options -> Entry -> Maybe Int64 -> String
-showEntry' opt ent@(Entry path' _ _ size du cnt hash) hid = mconcat
+showEntry' :: Options -> Entry -> String -> Maybe Int64 -> String
+showEntry' opt ent@(Entry _ _ _ size du cnt hash) path' hid = mconcat
   [ if optHID opt then printf "%5s  " $ "#" ++ maybe "*" show hid else ""
   , if optSHA1 opt -- if hash is still Nothing, there was an I/O error
       then maybe (replicate 40 '*') hexlify hash ++ "  "          else ""
@@ -635,7 +672,7 @@ showEntry' opt ent@(Entry path' _ _ size du cnt hash) hid = mconcat
       if isDir ent then printf "%14s" ("("++ show cnt ++ ")  ")
                    else "              "
                                                                   else ""
-  , B8.toString path'
+  , path'
   ]
 
 formatSize :: Options -> Int -> String

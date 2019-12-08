@@ -177,7 +177,7 @@ preParseArgs' ss = preParseArgs (ss, map B8.fromString ss)
 testOptParse :: TestTree
 testOptParse = testCase "option parsing tests" $ do
   shortOptions @?= "RlzkI" -- reminder to update these tests if options change
-  longOptions @?= ["depth", "cache-level", "minsize", "mincount", "init-db", "files-from"]
+  longOptions @?= ["depth", "cache-level", "minsize", "mincount", "color", "init-db", "files-from"]
   preParseArgs' []                          @?= ([], [])
   preParseArgs' ["x"]                       @?= ([], ["x"])
   preParseArgs' ["-"]                       @?= ([], ["-"])
