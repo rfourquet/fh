@@ -3,9 +3,10 @@
 module DB (DB, DBEntry, DBKey, DBTime, closeDB, createDBDirectory, getDB,
            getHID, getTarget, insertDB, newDB, deleteDB, resetHID, updateDB) where
 
-import           Control.Monad      (join, mapM_, (>=>))
+import Control.Concurrent.Thread.Delay (delay)
+import           Control.Monad      (join, mapM_, (>=>), when)
 import qualified Data.ByteString    as BS
-import           Data.Int           (Int64)
+import           Data.Int           (Int8, Int64)
 import           Data.IORef
 import           Data.List          (find)
 import           Data.Maybe         (fromMaybe, isJust)
@@ -19,6 +20,7 @@ import           System.Directory   (XdgDirectory (XdgCache), canonicalizePath,
 import           System.FilePath    (dropTrailingPathSeparator, (<.>), (</>))
 import           System.IO          (hPutStrLn, stderr)
 import           System.Posix.Types (DeviceID)
+import System.Random
 
 import qualified Mnt
 
@@ -165,7 +167,8 @@ setDB (DB mps dbR _) dev = do
 open' :: DeviceID -> Maybe FilePath -> FilePath -> IO DB'
 open' dev target path = do
   db <- open $ fromString path
-  exec db  " CREATE TABLE IF NOT EXISTS files ( \
+  exec db  " PRAGMA busy_timeout = 100000;      \
+           \ CREATE TABLE IF NOT EXISTS files ( \
            \   key   INTEGER PRIMARY KEY,       \
            \   utime INTEGER,                   \
            \   size  INTEGER,                   \
@@ -196,6 +199,7 @@ insert' (key, utime, size, du, cnt, sha1, hpath) db = do
   bind ins [int key, int utime, int size, int du, int cnt, SQLBlob sha1, SQLBlob hpath]
   _ <- step ins
   reset ins
+  restartTx db
 
 update' :: DBEntry -> DB' -> IO ()
 update' (key, utime, size, du, cnt, sha1, hpath) db = do
@@ -203,6 +207,7 @@ update' (key, utime, size, du, cnt, sha1, hpath) db = do
   bind upd [int utime, int size, int du, int cnt, SQLBlob sha1, SQLBlob hpath, int key]
   _ <- step upd
   reset upd
+  restartTx db
 
 get' :: DBKey -> DB' -> IO (Maybe DBEntry)
 get' key db = do
@@ -223,6 +228,15 @@ delete' key db = do
   bindInt64 del 1 key
   _ <- step del
   reset del
+  restartTx db
+
+restartTx :: DB' -> IO ()
+restartTx db = do
+  x <- randomIO :: IO Int8
+  when (x == 0) $ do
+    exec (_DB db) "end transaction"
+    delay 1000
+    exec (_DB db) "begin transaction"
 
 
 -- ** Hash ID
