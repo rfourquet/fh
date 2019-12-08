@@ -40,11 +40,11 @@ Usage: fh [-?|--long-help] [-x|--sha1] [-#|--hid] [-s|--size] [-d|--disk-usage]
 Available options:
   -h,--help                Show this help text
   -?,--long-help           show help for --cache-level and --init-db options
-  -x,--sha1                print sha1 hash (in hexadecimal) (DEFAULT)
+  -x,--sha1                print sha1 hash (in hexadecimal)
   -#,--hid                 print unique (system-wide) integer ID corresponding
                            to sha1 hash (use twice to reset the counter)
   -s,--size                print (apparent) size (DEFAULT)
-  -d,--disk-usage          print actual size (disk usage) (EXPERIMENTAL)
+  -d,--disk-usage          print actual size (disk usage) (DEFAULT, EXPERIMENTAL)
   -n,--count               print number of (recursively) contained files
   -c,--total               produce a grand total
   -R,--depth INT           report entries recursively up to depth INT

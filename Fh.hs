@@ -54,10 +54,10 @@ import           Stat                        (fileBlockSize)
 
 data Options = Options { optHelp      :: Bool
 
-                       , _optSHA1     :: Bool
+                       , optSHA1      :: Bool
                        , _optHID      :: Int
                        , _optSize     :: Bool
-                       , optDU        :: Bool
+                       , _optDU       :: Bool
                        , optCnt       :: Bool
                        , optTotal     :: Bool
 
@@ -86,10 +86,10 @@ data Options = Options { optHelp      :: Bool
                        }
 
 optOutUnspecified :: Options -> Bool
-optOutUnspecified opt = not . or $ [_optSHA1, optHID, _optSize, optDU, optCnt] <*> pure opt
+optOutUnspecified opt = not . or $ [optSHA1, optHID, _optSize, _optDU, optCnt] <*> pure opt
 
-optSHA1 :: Options -> Bool
-optSHA1 opt = optOutUnspecified opt || _optSHA1 opt
+optDU :: Options -> Bool
+optDU opt = optOutUnspecified opt || _optDU opt
 
 optSHA1' :: Options -> Bool -- whether sha1 must be computed
 optSHA1' opt = optSHA1 opt || optHID opt
@@ -116,14 +116,14 @@ parserOptions = Options
                 <$> switch (long "long-help" <> short '?' <>
                             help "show help for --cache-level and --init-db options")
                 <*> switch (long "sha1" <> short 'x' <>
-                            help "print sha1 hash (in hexadecimal) (DEFAULT)")
+                            help "print sha1 hash (in hexadecimal)")
                 <*> (length <$> many (flag' () $
                        long "hid" <> short '#' <>
                        help "print unique (system-wide) integer ID corresponding to sha1 hash (use twice to reset the counter)"))
                 <*> switch (long "size" <> short 's' <>
                             help "print (apparent) size (DEFAULT)")
                 <*> switch (long "disk-usage" <> short 'd' <>
-                            help "print actual size (disk usage) (EXPERIMENTAL)")
+                            help "print actual size (disk usage) (DEFAULT, EXPERIMENTAL)")
                 <*> switch (long "count" <> short 'n' <>
                             help "print number of (recursively) contained files")
                 <*> switch (long "total" <> short 'c' <>
@@ -290,7 +290,7 @@ fh consumer args paths = do
                                                              optMinCnt o <= _cnt ent)
 
            if optSortFirst opt && optSortAny opt && (optSHA1' opt || optUnique opt)
-             then go (opt { _optSHA1   = False
+             then go (opt { optSHA1    = False
                           , _optHID    = 0
                           ,  optUnique = False
                           , _optCLevel = optCLevel opt -- clevel -1 is sensible to hashing & unique, which are disabled here
