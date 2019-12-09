@@ -68,6 +68,7 @@ data Options = Options { optHelp      :: Bool
 
                        , optDepth     :: Int
                        , _optCLevel   :: CacheLevel
+                       , _optCLevel1  :: Bool
                        , optMtime     :: Bool
                        , optSLink     :: Bool
                        , optALink     :: Bool
@@ -113,7 +114,8 @@ optSortD opt = _optSortD opt && not (optSortCnt opt)
 optSortAny opt = _optSortS opt || _optSortD opt || optSortCnt opt
 
 optCLevel :: Options -> CacheLevel
-optCLevel opt | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
+optCLevel opt | _optCLevel1 opt                                         = 1
+              | _optCLevel opt == -1 && (optSHA1' opt || optUnique opt) = 1
               | _optCLevel opt == -1                                    = 2
               | otherwise                                               = _optCLevel opt
 
@@ -139,6 +141,8 @@ parserOptions = Options
                                  help "report entries recursively up to depth INT")
                 <*> option clevel (long "cache-level" <> short 'l' <> value (-1) <> metavar "INT" <>
                                    help "policy for cache use, in 0..3 (default: 1 or 2)")
+                <*> switch (long "cache-level-1" <> short '1' <>
+                            help "equivalent to (and _currently_ takes precedence over) --cache-level 1")
                 <*> switch (long "mtime" <> short 'm' <>
                             help "use mtime instead of ctime to interpret cache level")
                 <*> switch (long "dereference" <> short 'L' <>
