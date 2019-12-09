@@ -32,7 +32,8 @@ import qualified Streaming.Prelude           as S
 import           System.Directory            (canonicalizePath, findExecutable)
 import           System.Environment          (getArgs)
 import           System.FilePath             (makeRelative)
-import           System.IO                   (Handle, hGetEncoding, hPutStrLn, hSetEncoding,
+import           System.IO                   (BufferMode(LineBuffering), Handle, hGetEncoding, hGetLine,
+                                              hPutStrLn, hSetBuffering, hSetEncoding,
                                               mkTextEncoding, stderr, stdin, stdout)
 import           System.Posix.ByteString     (RawFilePath)
 import qualified System.Posix.Env.ByteString
@@ -44,7 +45,7 @@ import           System.Posix.Files          (FileStatus, accessModes, deviceID,
 import           System.Posix.IO             (stdOutput)
 import           System.Posix.Terminal       (queryTerminal)
 import           System.Posix.Types          (DeviceID, FileID, FileMode)
-import           System.Process              (readProcess)
+import           System.Process              (createProcess, StdStream(CreatePipe), proc, std_in, std_out)
 import           Text.Printf                 (printf)
 
 import           DB
@@ -276,6 +277,35 @@ preParseArgs = filterPath Switch
             c = parseArg b
     filterPath _ _ = ([], [])
 
+-- * lscolors
+
+-- TODO: should we store a ref to the process and manually call cleanupProcess on it at the end?
+type LsColors = Maybe (Handle, Handle) -- (stdin, stdout)
+
+useColor :: Options -> IO Bool
+useColor opt = do
+  case optColor opt of
+    Never -> return False
+    _     -> do
+      haveLsColors <- isJust <$> findExecutable "lscolors"
+      if not haveLsColors
+        then return False
+        else case optColor opt of
+          Always -> return True
+          Auto   -> queryTerminal stdOutput -- is TTY
+          Never  -> undefined -- how to silence the compiler warning without this line?
+
+makeLsColors :: Options -> IO LsColors
+makeLsColors opt = do
+  useColor' <- useColor opt
+  if useColor'
+    then do
+      (Just hin, Just hout, _, _) <-
+        createProcess (proc "lscolors" []){ std_in = CreatePipe, std_out = CreatePipe }
+      hSetBuffering hin LineBuffering
+      return $ Just (hin, hout)
+    else return Nothing
+
 
 -- * main
 
@@ -367,7 +397,8 @@ fhCLI = do mapM_ mkTranslitEncoding [stdout, stderr, stdin]
 
 fhPrint :: FhConsumer
 fhPrint opt db entries = do
-  let printEntry = putStr <=< showEntry opt db
+  lsColors <- makeLsColors opt
+  let printEntry = putStrLn <=< showEntry opt db lsColors
 
   list <- S.toList_ $ if optSortAny opt
                         then entries
@@ -638,23 +669,12 @@ fromRawString s = B.pack . concat $ charToBytes . ord <$> s
 
 -- * display
 
-showEntry :: Options -> DB -> Entry -> IO String
-showEntry opt db ent = do
-  -- TODO: check istty only once in a run, and try to keep one instance of `lscolors`
-  --       running, and re-use it for coloring all entries, it might make the whole
-  --       thing faster (using colors is currently significantly slower)
-  useColor <- case optColor opt of
-    Always -> return True
-    Never  -> return False
-    Auto   -> do
-      istty <- queryTerminal stdOutput
-      lscolors <- findExecutable "lscolors"
-      return $ istty && isJust lscolors
-  let path' = B8.toString (_path ent) ++ "\n" -- lscolors needs trailing '\n'
-  colored <- if useColor
-             -- TODO: catch possible exceptions thrown from this readProcess
-             then readProcess "lscolors" [] path'
-             else return path'
+showEntry :: Options -> DB -> LsColors ->Entry -> IO String
+showEntry opt db lsColors ent = do
+  let path' = B8.toString (_path ent)
+  colored <- case lsColors of
+    Nothing          -> return path'
+    Just (hin, hout) -> hPutStrLn hin path' >> hGetLine hout
   showEntry' opt ent colored <$>
     if optHID opt then sequence $ getHID' db <$> _hash ent
                   else return Nothing
