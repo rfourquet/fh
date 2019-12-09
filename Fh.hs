@@ -640,11 +640,13 @@ mkKey opt db status path = do
           ws   = fromIntegral <$> B.unpack hash :: [DBKey]
           h64  = mask $ sum [w `shiftL` i | (w, i) <- zip ws [0, 8..56]]
       return $ PathHash (bits .|. h64) hash
-  where bits = if optSLink    opt && isDirectory status then bit 63 else 0
-           .|. if optALink    opt && isDirectory status then bit 62 else 0
-           .|. if optAPretend opt && isDirectory status then bit 61 else 0
-           .|. if optUnique   opt && isDirectory status then bit 60 else 0
-           .|. if optUseModes opt && isDirectory status then bit 59 else 0
+  where bits = if isDirectory status
+                  then (if optSLink    opt then bit 63 else 0)
+                   .|. (if optALink    opt then bit 62 else 0)
+                   .|. (if optAPretend opt then bit 61 else 0)
+                   .|. (if optUnique   opt then bit 60 else 0)
+                   .|. (if optUseModes opt then bit 59 else 0)
+                   else 0
         mask :: DBKey -> DBKey
         mask = (.&. (bit 59 - 1))
 
